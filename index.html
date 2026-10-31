@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>YT Playlist Random</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="header">
+    <h1 class="brand">YT Playlist Random</h1>
+    <button id="options-btn" class="icon-btn" title="Options">&#9881;</button>
+  </header>
+
+  <div id="controls-section" class="controls hidden">
+    <button id="prev-btn" class="ctrl-btn" title="Previous">&#9198;</button>
+    <button id="play-btn" class="ctrl-btn play" title="Play">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" class="icon">
+        <path d="M8 5v14l11-7z" />
+      </svg>
+    </button>
+    <button id="next-btn" class="ctrl-btn" title="Next">&#9197;</button>
+    <div class="now-playing-box">
+      <div id="now-playing" class="now-playing"></div>
+      <div id="queue-position" class="queue-position hint"></div>
+    </div>
+  </div>
+
+  <section id="queue-section" class="queue-section hidden">
+    <div class="section-head-row">
+      <span id="queue-title" class="section-title"></span>
+      <span id="queue-count" class="hint"></span>
+    </div>
+    <ul id="queue-list" class="queue-list"></ul>
+  </section>
+
+  <section class="add-section">
+    <div class="add-row">
+      <input id="url-input" type="text" spellcheck="false" placeholder="URL de la playlist" />
+      <button id="add-btn" class="primary small">Añadir</button>
+    </div>
+    <p id="add-error" class="error hidden"></p>
+  </section>
+
+  <section class="playlists-section">
+    <div class="section-head-row">
+      <span id="playlists-title" class="section-title">Playlists</span>
+      <button id="refresh-all-btn" class="ghost mini hidden">Recargar todo</button>
+    </div>
+    <p id="playlists-empty" class="hint"></p>
+    <ul id="playlist-list" class="playlist-list"></ul>
+  </section>
+
+  <section class="modes-section">
+    <span id="mode-title" class="section-title">Modo</span>
+    <div id="mode-list" class="mode-list"></div>
+    <label class="toggle-row" for="dedupe-toggle">
+      <input id="dedupe-toggle" type="checkbox" />
+      <span class="toggle-visual"></span>
+      <span id="dedupe-label" class="toggle-label"></span>
+    </label>
+    <p id="dedupe-desc" class="hint toggle-hint"></p>
+    <label class="toggle-row" for="reshuffle-toggle">
+      <input id="reshuffle-toggle" type="checkbox" />
+      <span class="toggle-visual"></span>
+      <span id="reshuffle-label" class="toggle-label"></span>
+    </label>
+    <p id="reshuffle-desc" class="hint toggle-hint"></p>
+  </section>
+
+  <div class="actions">
+    <button id="mix-play-btn" class="primary"></button>
+    <button id="mix-btn" class="ghost"></button>
+  </div>
+  <p id="status-line" class="hint"></p>
+  <p id="gen-error" class="error hidden"></p>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

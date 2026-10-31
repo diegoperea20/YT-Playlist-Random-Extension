@@ -1,0 +1,9 @@
+# Secrets and generated build artifacts — never commit the real key.
+.env
+config.js
+
+# Common local noise
+node_modules/
+*.zip
+.DS_Store
+Thumbs.db

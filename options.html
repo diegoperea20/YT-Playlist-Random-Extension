@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>YT Playlist Random — Options</title>
+  <link rel="stylesheet" href="popup.css" />
+  <style>
+    body { width: 460px; max-width: 92vw; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 16px; margin: 0 0 14px; }
+    .opt-section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .opt-label { font-weight: 600; font-size: 13px; display: block; margin-bottom: 6px; }
+    .opt-desc { font-size: 11.5px; color: var(--text-dim); margin: 6px 0 8px; line-height: 1.5; }
+    .site-options { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+    .site-options label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+    .site-options input { accent-color: var(--accent); }
+    #api-key { width: 100%; }
+    .saved { color: var(--green); font-size: 12px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <h1>YT Playlist Random</h1>
+
+  <div class="opt-section">
+    <label class="opt-label" id="api-key-label" for="api-key">API key</label>
+    <p class="opt-desc" id="api-key-desc"></p>
+    <div style="display:flex; align-items:center;">
+      <input id="api-key" type="text" spellcheck="false" placeholder="YOUTUBE_API_KEY" />
+    </div>
+  </div>
+
+  <div class="opt-section">
+    <label class="opt-label" id="site-label">Target</label>
+    <p class="opt-desc" id="site-desc"></p>
+    <div class="site-options">
+      <label><input type="radio" name="site" value="youtube" /><span id="site-youtube-label"></span></label>
+      <label><input type="radio" name="site" value="music" /><span id="site-music-label"></span></label>
+    </div>
+  </div>
+
+  <div style="display:flex; align-items:center;">
+    <button id="save-btn" class="primary">Save</button>
+    <span id="saved-ok" class="saved hidden">✓</span>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

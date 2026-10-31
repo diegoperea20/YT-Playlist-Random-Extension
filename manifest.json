@@ -1,0 +1,37 @@
+{
+  "name": "__MSG_app_name__",
+  "description": "__MSG_app_description__",
+  "version": "1.0.0",
+  "author": "Diego Ivan Perea Montealegre",
+  "manifest_version": 3,
+  "default_locale": "en",
+  "icons": {
+    "16": "images/16.png",
+    "32": "images/32.png",
+    "48": "images/48.png",
+    "128": "images/128.png"
+  },
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "__MSG_app_name__"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://www.googleapis.com/*",
+    "https://*.youtube.com/*",
+    "https://*.ytimg.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://music.youtube.com/*"],
+      "exclude_matches": ["https://www.youtube.com/embed/*", "https://www.youtube.com/live_chat*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

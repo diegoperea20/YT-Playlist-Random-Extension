@@ -1,0 +1,125 @@
+{
+  "app_name": {
+    "message": "YT Playlist Random"
+  },
+  "app_description": {
+    "message": "Merge and shuffle YouTube / YouTube Music playlists, then play them back with YouTube's own player."
+  },
+
+  "add_placeholder": { "message": "Paste a YouTube or YouTube Music playlist URL" },
+  "add_btn": { "message": "Add" },
+  "add_hint": { "message": "Public or unlisted playlists only." },
+  "playlists_title": { "message": "Playlists" },
+  "playlists_empty": { "message": "No playlists yet. Paste a playlist URL above to start." },
+  "refresh_all": { "message": "Reload all" },
+  "refresh_one": { "message": "Reload from YouTube" },
+  "remove_one": { "message": "Remove playlist" },
+  "toggle_in_mix": {
+    "message": "Include in mix: $NAME$",
+    "placeholders": { "name": { "content": "$1" } }
+  },
+  "track_count_suffix": { "message": "tracks" },
+
+  "mode_title": { "message": "Mix mode" },
+  "mode_consecutive_random": { "message": "Consecutive random" },
+  "mode_consecutive_random_desc": {
+    "message": "Alternates between playlists, taking one random unused track per turn."
+  },
+  "mode_full_shuffle": { "message": "Full shuffle" },
+  "mode_full_shuffle_desc": { "message": "Mixes the tracks of every playlist into a single pool." },
+  "mode_proportional": { "message": "Proportional" },
+  "mode_proportional_desc": {
+    "message": "Alternates while respecting the relative size of each playlist."
+  },
+  "mode_sequential_blocks": { "message": "Sequential blocks" },
+  "mode_sequential_blocks_desc": {
+    "message": "Plays playlist by playlist, each one shuffled internally."
+  },
+  "mode_none": { "message": "No randomization" },
+  "mode_none_desc": { "message": "Concatenates the playlists in their original order." },
+
+  "dedupe": { "message": "Remove duplicates" },
+  "dedupe_desc": {
+    "message": "A track present in several playlists only enters the mix once."
+  },
+  "reshuffle_rounds": { "message": "Reshuffle rounds" },
+  "reshuffle_rounds_desc": {
+    "message": "Changes the playlist order on every round for more variety."
+  },
+
+  "mix_play": { "message": "Shuffle & play" },
+  "mix_only": { "message": "Shuffle only" },
+  "queue_title": { "message": "Queue" },
+  "in_queue": {
+    "message": "$COUNT$ in queue",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "queue_position": {
+    "message": "$INDEX$ / $TOTAL$",
+    "placeholders": {
+      "index": { "content": "$1" },
+      "total": { "content": "$2" }
+    }
+  },
+  "queue_finished": { "message": "The queue is done. Shuffle again to keep going." },
+  "unavailable_badge": { "message": "unavailable" },
+  "nothing_playing": { "message": "Not playing" },
+
+  "play": { "message": "Play" },
+  "pause": { "message": "Pause" },
+  "prev": { "message": "Previous track" },
+  "next_title": { "message": "Next track" },
+  "options_title": { "message": "Options" },
+
+  "default_playlist_label": { "message": "Playlist" },
+  "untitled": { "message": "Untitled" },
+  "unknown_channel": { "message": "Unknown channel" },
+
+  "options_api_key_label": { "message": "YouTube Data API v3 key" },
+  "options_api_key_desc": {
+    "message": "Leave empty to use the key bundled with the extension. The key travels with every request to googleapis.com (there is no server), so rotate it here if it ever leaks."
+  },
+  "options_site_label": { "message": "Playback site" },
+  "options_site_desc": {
+    "message": "Where the shuffled queue plays. YouTube Music cannot play every regular video; incompatible tracks are skipped automatically."
+  },
+  "site_youtube": { "message": "www.youtube.com" },
+  "site_music": { "message": "music.youtube.com" },
+  "save_btn": { "message": "Save" },
+  "options_no_key_hint": { "message": "No key configured — add one to enable loading playlists" },
+
+  "err_empty": { "message": "Paste a playlist URL first." },
+  "err_invalid_url": { "message": "That is not a valid URL." },
+  "err_unsupported_host": { "message": "Only YouTube or YouTube Music URLs are supported." },
+  "err_missing_list_param": {
+    "message": "That URL points to /playlist but has no 'list' parameter."
+  },
+  "err_not_a_playlist": {
+    "message": "That URL has no playlist. Use a URL with 'list=…' (a playlist or a watch URL that includes one)."
+  },
+  "err_auto_mix": {
+    "message": "Auto-generated mixes ('RD…') cannot be loaded with the Data API."
+  },
+  "err_liked_music": {
+    "message": "'Liked music' and private lists ('LL'/'WL') are not accessible."
+  },
+  "err_missing_api_key": {
+    "message": "No API key. Set it in the extension options (context menu of the extension → Options)."
+  },
+  "err_playlist_not_found": {
+    "message": "Playlist not found. Check the URL (it must be public or unlisted)."
+  },
+  "err_playlist_not_accessible": {
+    "message": "The playlist is not accessible with this API key."
+  },
+  "err_quota_exceeded": {
+    "message": "YouTube API quota exceeded. Try again later or use another API key."
+  },
+  "err_forbidden": { "message": "The API key was rejected by YouTube (403)." },
+  "err_no_active_playlists": { "message": "Add at least one playlist and mark it active." },
+  "err_no_tracks": {
+    "message": "There are no available tracks after the removes (dedupe)."
+  },
+  "err_no_queue": { "message": "Generate the queue first with 'Shuffle'." },
+  "err_unknown": { "message": "Unexpected error. Check the URL or try again." }
+}

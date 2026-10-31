@@ -1,0 +1,541 @@
+import { BUNDLED_API_KEY } from './config.js'
+import { parsePlaylistUrl, playlistUrl } from './lib/parseUrl.js'
+import { loadPlaylistTracks, requireApiKey } from './lib/api.js'
+import { YoutubeApiError, codeOf } from './lib/errors.js'
+import { generateQueue } from './lib/shuffle/index.js'
+import { DEFAULT_SETTINGS } from './lib/types.js'
+
+const SETTINGS_KEY = 'settings'
+const PLAYLISTS_KEY = 'playlists'
+const QUEUE_KEY = 'queueState'
+const PLAYBACK_KEY = 'playback'
+
+// ---------------------------------------------------------------------------
+// Storage helpers. MV3 workers die between events, so ALL state lives in
+// chrome.storage (local for durable config, session for the active queue).
+// ---------------------------------------------------------------------------
+
+async function storageGet(area, key, fallback) {
+  const result = await chrome.storage[area].get(key)
+  return result[key] ?? fallback
+}
+
+async function storageSet(area, key, value) {
+  await chrome.storage[area].set({ [key]: value })
+}
+
+function mergeSettings(stored) {
+  return { ...DEFAULT_SETTINGS, ...(stored ?? {}) }
+}
+
+async function getSettings() {
+  return mergeSettings(await storageGet('local', SETTINGS_KEY, undefined))
+}
+
+async function saveSettings(settings) {
+  await storageSet('local', SETTINGS_KEY, settings)
+}
+
+function getPlaylists() {
+  return storageGet('local', PLAYLISTS_KEY, [])
+}
+
+async function savePlaylists(list) {
+  await storageSet('local', PLAYLISTS_KEY, list)
+}
+
+function getQueueState() {
+  return storageGet('session', QUEUE_KEY, undefined)
+}
+
+async function saveQueueState(state) {
+  await storageSet('session', QUEUE_KEY, state)
+}
+
+function getPlayback() {
+  return storageGet('session', PLAYBACK_KEY, {
+    playing: false,
+    tabId: null,
+    videoId: null, // last videoId known to be on the playback tab
+  })
+}
+
+async function savePlayback(playback) {
+  await storageSet('session', PLAYBACK_KEY, playback)
+}
+
+// ---------------------------------------------------------------------------
+// Playback plumbing
+// ---------------------------------------------------------------------------
+
+function watchUrl(site, videoId) {
+  const host = site === 'music' ? 'music.youtube.com' : 'www.youtube.com'
+  return `https://${host}/watch?v=${videoId}`
+}
+
+async function currentTrack() {
+  const queue = await getQueueState()
+  if (!queue?.queue?.length) return undefined
+  return queue.queue[queue.index ?? 0]
+}
+
+/**
+ * Reuse the playback tab when alive and on the right host; otherwise activate the
+ * first matching YouTube tab; otherwise open a new one pointed straight at the
+ * current track (the site's own player autoplays it).
+ */
+async function ensurePlaybackTab(site) {
+  const playback = await getPlayback()
+  const host = site === 'music' ? 'music.youtube.com' : 'www.youtube.com'
+  const pattern = `https://${host}/*`
+  const track = await currentTrack()
+  const targetUrl = watchUrl(site, track?.id ?? '')
+
+  if (playback.tabId != null) {
+    try {
+      const tab = await chrome.tabs.get(playback.tabId)
+      if (tab?.url && new URL(tab.url).hostname === host) return { tab, fresh: false }
+    } catch {
+      // Tab is gone; fall through to query.
+    }
+  }
+
+  const candidates = await chrome.tabs.query({ url: pattern })
+  if (candidates.length > 0) {
+    const tab = candidates[0]
+    await savePlayback({ ...(await getPlayback()), tabId: tab.id })
+    return { tab, fresh: false }
+  }
+
+  // No suitable tab: create one already on the current track.
+  const tab = await chrome.tabs.create({ url: targetUrl, active: true })
+  await savePlayback({ ...(await getPlayback()), tabId: tab.id })
+  return { tab, fresh: true }
+}
+
+/**
+ * THE playback path: hand the track to YouTube's own player by navigating the
+ * playback tab to its native watch URL (full reloads are fine).
+ */
+async function navigateToCurrentTrack(tabId) {
+  const track = await currentTrack()
+  if (!track?.id) return
+  const settings = await getSettings()
+  const playback = await getPlayback()
+  await savePlayback({ ...playback, videoId: track.id })
+  await chrome.tabs.update(tabId, { url: watchUrl(settings.site, track.id) })
+}
+
+/** Resume playback of the track already loaded in the tab, without navigating. */
+async function tryResumeInPlace(playback, track) {
+  if (playback.tabId == null || playback.videoId !== track.id) return false
+  try {
+    await chrome.tabs.sendMessage(playback.tabId, { type: 'resume-video' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Advance to the next queue entry, reusing the normal playback path. */
+async function advanceQueue(tabId) {
+  const queue = await getQueueState()
+  if (!queue?.queue?.length) return { action: 'idle' }
+
+  const nextIndex = (queue.index ?? 0) + 1
+  if (nextIndex >= queue.queue.length) {
+    const playback = await getPlayback()
+    await savePlayback({ ...playback, playing: false })
+    return { action: 'queue-end', index: queue.index ?? 0, total: queue.queue.length }
+  }
+
+  queue.index = nextIndex
+  await saveQueueState(queue)
+
+  const playback = await getPlayback()
+  if (playback.playing) {
+    const tabId = playback.tabId ?? tabId
+    if (tabId != null) await navigateToCurrentTrack(tabId)
+  }
+  return { action: 'next', index: nextIndex, videoId: queue.queue[nextIndex].id }
+}
+
+/**
+ * A track cannot be played on the site (hidden/unavailable). Mark the track in
+ * every stored playlist as unavailable (the dedupe/available filter honours it)
+ * and skip it like a normal end-of-track.
+ */
+async function handleTrackSkip(tabId, videoId) {
+  const playlists = await getPlaylists()
+  let touched = false
+  for (const playlist of playlists) {
+    for (const track of playlist.tracks ?? []) {
+      if (track.id === videoId && track.available) {
+        track.available = false
+        touched = true
+      }
+    }
+  }
+  if (touched) {
+    await savePlaylists(playlists)
+  }
+
+  if (tabId != null) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: 'ignore-ended', videoId })
+    } catch { /* best effort */ }
+  }
+  return advanceQueue(tabId)
+}
+
+// ---------------------------------------------------------------------------
+// Playlist management
+// ---------------------------------------------------------------------------
+
+async function newPlaylist(playlistId, apiKey, labelFallbackPrefix) {
+  const fallbacks = {
+    untitled: ui('untitled'),
+    unknownChannel: ui('unknown_channel'),
+  }
+  const { tracks, label } = await loadPlaylistTracks(playlistId, apiKey, fallbacks)
+
+  const existing = await getPlaylists()
+  const defaultLabel = label ?? `${labelFallbackPrefix} ${existing.length + 1}`
+
+  return {
+    id: playlistId,
+    label: defaultLabel,
+    url: playlistUrl(playlistId),
+    tracks,
+    loadedAt: Date.now(),
+    active: true,
+  }
+}
+
+function ui(key, args) {
+  return chrome.i18n.getMessage(key, args) ?? ''
+}
+
+async function loadOrCreatePlaylist(url) {
+  const parsed = parsePlaylistUrl(url)
+  if (!parsed.ok) {
+    throw new YoutubeApiError(parsed.reason)
+  }
+
+  const settings = await getSettings()
+  const apiKey = requireApiKey(settings.apiKey, BUNDLED_API_KEY)
+  const playlists = await getPlaylists()
+  const existingIndex = playlists.findIndex((p) => p.id === parsed.playlistId)
+
+  const playlist = await newPlaylist(parsed.playlistId, apiKey, ui('default_playlist_label'))
+
+  if (existingIndex >= 0) {
+    playlist.label = playlists[existingIndex].label || playlist.label
+    playlists[existingIndex] = playlist
+  } else {
+    playlists.push(playlist)
+  }
+  await savePlaylists(playlists)
+
+  return playlist
+}
+
+// ---------------------------------------------------------------------------
+// Message router
+// ---------------------------------------------------------------------------
+
+async function sendMessageToPlaybackTab(message) {
+  const playback = await getPlayback()
+  if (playback.tabId == null) return false
+  try {
+    await chrome.tabs.sendMessage(playback.tabId, message)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function handleMessage(message, sender) {
+  switch (message?.type) {
+    // ---------------------------------------------------------------- settings
+    case 'get-state': {
+      const [settings, playlists, queue, playback] = await Promise.all([
+        getSettings(),
+        getPlaylists(),
+        getQueueState(),
+        getPlayback(),
+      ])
+      let tabMissing = false
+      if (playback.tabId != null) {
+        try { await chrome.tabs.get(playback.tabId) } catch { tabMissing = true }
+      }
+      return {
+        ok: true,
+        settings,
+        playlists: playlists.map((p) => ({
+          id: p.id,
+          label: p.label,
+          url: p.url,
+          loadedAt: p.loadedAt,
+          active: p.active,
+          trackCount: (p.tracks ?? []).length,
+          availableCount: (p.tracks ?? []).filter((t) => t.available).length,
+        })),
+        queue,
+        playback: { ...playback, tabMissing },
+      }
+    }
+
+    case 'set-settings': {
+      const settings = await getSettings()
+      const next = mergeSettings({ ...settings, ...message.patch })
+      await saveSettings(next)
+      return { ok: true, settings: next }
+    }
+
+    case 'get-effective-key': {
+      const settings = await getSettings()
+      const missing = !String(settings.apiKey || '').trim() && !BUNDLED_API_KEY
+      return { ok: true, apiKey: settings.apiKey || BUNDLED_API_KEY, missing }
+    }
+
+    // -------------------------------------------------------------- playlists
+    case 'add-playlist': {
+      const playlist = await loadOrCreatePlaylist(message.url)
+      return {
+        ok: true,
+        playlist: { ...playlist, tracks: undefined, trackCount: playlist.tracks.length },
+      }
+    }
+
+    case 'refresh-playlist': {
+      const playlists = await getPlaylists()
+      const target = playlists.find((p) => p.id === message.id)
+      if (!target) throw new YoutubeApiError('playlist-not-found')
+      const settings = await getSettings()
+      const apiKey = requireApiKey(settings.apiKey, BUNDLED_API_KEY)
+      const fallbacks = { untitled: ui('untitled'), unknownChannel: ui('unknown_channel') }
+      const { tracks } = await loadPlaylistTracks(target.id, apiKey, fallbacks)
+      target.tracks = tracks
+      target.loadedAt = Date.now()
+      await savePlaylists(playlists)
+      return { ok: true, trackCount: tracks.length }
+    }
+
+    case 'remove-playlist': {
+      const playlists = await getPlaylists()
+      await savePlaylists(playlists.filter((p) => p.id !== message.id))
+      return { ok: true }
+    }
+
+    case 'set-playlist-active': {
+      const playlists = await getPlaylists()
+      const target = playlists.find((p) => p.id === message.id)
+      if (target) {
+        target.active = Boolean(message.active)
+        target.label = message.label?.trim() ? message.label.trim().slice(0, 64) : target.label
+        await savePlaylists(playlists)
+      }
+      return { ok: true }
+    }
+
+    // -------------------------------------------------------- queue + playback
+    case 'shuffle': {
+      const settings = await getSettings()
+      const playlists = (await getPlaylists()).filter((p) => p.active)
+      if (playlists.length === 0) {
+        throw new YoutubeApiError('no-active-playlists')
+      }
+
+      // Reload tracks for brand-new or emptied playlists before mixing.
+      const apiKey = requireApiKey(settings.apiKey, BUNDLED_API_KEY)
+      const fallbacks = { untitled: ui('untitled'), unknownChannel: ui('unknown_channel') }
+      for (const playlist of playlists) {
+        if (!playlist.tracks?.length) {
+          const { tracks } = await loadPlaylistTracks(playlist.id, apiKey, fallbacks)
+          playlist.tracks = tracks
+          playlist.loadedAt = Date.now()
+        }
+      }
+      await savePlaylists(playlists) // persist any reload above
+
+      const plain = playlists.filter((p) => (p.tracks ?? []).length > 0)
+      const tracks = generateQueue(settings.mode, plain, {
+        dedupe: settings.dedupe,
+        reshuffleRounds: settings.reshuffleRounds,
+      })
+      if (tracks.length === 0) {
+        throw new YoutubeApiError('no-tracks')
+      }
+
+      const queueState = {
+        queue: tracks,
+        index: 0,
+        mode: settings.mode,
+        generatedAt: Date.now(),
+      }
+      await saveQueueState(queueState)
+
+      let playback = await getPlayback()
+      playback = { ...playback, playing: false, videoId: null }
+      await savePlayback(playback)
+
+      if (message.andPlay) {
+        const { tab, fresh } = await ensurePlaybackTab(settings.site)
+        await savePlayback({ ...(await getPlayback()), playing: true })
+        // A fresh tab already opens on the current watch URL; otherwise navigate.
+        if (!fresh) await navigateToCurrentTrack(tab.id)
+      }
+
+      return { ok: true, count: tracks.length, mode: settings.mode }
+    }
+
+    case 'set-playing': {
+      const playback = await getPlayback()
+      const value = Boolean(message.value)
+      if (value) {
+        const queue = await getQueueState()
+        if (!queue?.queue?.length) {
+          throw new YoutubeApiError('no-queue')
+        }
+        const track = queue.queue[queue.index ?? 0]
+        await savePlayback({ ...playback, playing: true })
+        // The same video is still loaded in the playback tab: resume in place.
+        if (await tryResumeInPlace(playback, track)) return { ok: true, resumed: true }
+        const settings = await getSettings()
+        const { tab } = await ensurePlaybackTab(settings.site)
+        await savePlayback({ ...(await getPlayback()), tabId: tab.id, playing: true })
+        await navigateToCurrentTrack(tab.id)
+      } else {
+        await savePlayback({ ...playback, playing: false })
+        await sendMessageToPlaybackTab({ type: 'pause-video' })
+      }
+      return { ok: true }
+    }
+
+    case 'next': {
+      const playback = await getPlayback()
+      const tabId = playback.tabId ?? (await ensurePlaybackTab((await getSettings()).site)).tab.id
+      return await advanceQueue(tabId)
+    }
+
+    case 'prev': {
+      const queue = await getQueueState()
+      const playback = await getPlayback()
+      if (!queue?.queue?.length) return { action: 'idle' }
+      if ((queue.index ?? 0) > 0) queue.index -= 1
+      await saveQueueState(queue)
+      const tab = await ensurePlaybackTab((await getSettings()).site)
+      await savePlayback({ ...(await getPlayback()), playing: true })
+      await navigateToCurrentTrack(tab.id)
+      return { action: 'prev', index: queue.index }
+    }
+
+    case 'jump-to': {
+      const queue = await getQueueState()
+      const playback = await getPlayback()
+      if (!queue?.queue?.length) return { ok: false }
+      const index = Math.max(0, Math.min(queue.queue.length - 1, Number(message.index) | 0))
+      queue.index = index
+      await saveQueueState(queue)
+      const tab = await ensurePlaybackTab((await getSettings()).site)
+      await savePlayback({ ...(await getPlayback()), playing: true })
+      await navigateToCurrentTrack(tab.id)
+      return { ok: true, index }
+    }
+
+    // ----------------------------------------------------------- from content.js
+    case 'content-ready': {
+      const playback = await getPlayback()
+      const queue = await getQueueState()
+      const track = queue?.queue?.[queue.index ?? 0]
+      const pageVideoId = sender?.tab?.url
+        ? (new URL(sender.tab.url).searchParams.get('v') ?? null)
+        : null
+
+      await savePlayback({
+        ...playback,
+        tabId: sender?.tab?.id ?? playback.tabId,
+        videoId: pageVideoId ?? playback.videoId,
+      })
+
+      // Never navigate from here (that would reload forever): the page that just
+      // loaded is nudged by content.js itself.
+      if (track && playback.playing) {
+        return { kick: true, videoId: track.id }
+      }
+      return { kick: false }
+    }
+
+    case 'play-state': {
+      const playback = await getPlayback()
+      await savePlayback({
+        ...playback,
+        playing: message.playing ?? playback.playing,
+        tabId: sender?.tab?.id ?? playback.tabId,
+        videoId: message.videoId ?? playback.videoId,
+      })
+      return { ok: true }
+    }
+
+    case 'track-ended': {
+      const playback = await getPlayback()
+      return await advanceQueue(playback.tabId ?? sender?.tab?.id ?? null)
+    }
+
+    case 'player-error': {
+      const playback = await getPlayback()
+      return await handleTrackSkip(playback.tabId ?? sender?.tab?.id ?? null, message.videoId)
+    }
+
+    case 'yt-navigation': {
+      // The page moved to another video without our command: YouTube's own
+      // autoplay grabbed it (we try to prevent it) or the user navigated.
+      // Either way, stop commanding this tab until the user presses play again.
+      const queue = await getQueueState()
+      const current = queue?.queue?.[queue.index ?? 0]
+      if (!current || current.id === message.videoId) return { ok: true }
+
+      const playback = await getPlayback()
+      const touched = playback.tabId != null && sender?.tab?.id === playback.tabId
+      if (touched && playback.playing) {
+        await savePlayback({ ...playback, playing: false, lostControl: true })
+      } else if (touched) {
+        await savePlayback({ ...playback, lostControl: true })
+      }
+      return { ok: true, backoff: touched && playback.playing }
+    }
+
+    default:
+      return { ok: false, code: 'unknown-message' }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  handleMessage(message, sender)
+    .then(sendResponse)
+    .catch((error) => {
+      const code = codeOf(error)
+      console.log('[YPR] error', code, error?.message)
+      sendResponse({ ok: false, code })
+    })
+  return true // async response
+})
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const playback = await getPlayback()
+  if (playback.tabId === tabId) {
+    await savePlayback({ ...playback, tabId: null, playing: false })
+  }
+})
+
+chrome.runtime.onInstalled.addListener(async () => {
+  const settings = await getSettings()
+  if (JSON.stringify(settings) === JSON.stringify(DEFAULT_SETTINGS)) {
+    await saveSettings(DEFAULT_SETTINGS)
+  }
+})

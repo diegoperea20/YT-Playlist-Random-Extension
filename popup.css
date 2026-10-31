@@ -1,0 +1,359 @@
+/* YT Playlist Random — popup (dark, YouTube-flavored) */
+
+:root {
+  --bg: #0f0f0f;
+  --panel: #1c1c1c;
+  --panel-2: #272727;
+  --border: #303030;
+  --text: #f1f1f1;
+  --text-dim: #a5a5a5;
+  --accent: #f00;
+  --accent-soft: rgba(255, 0, 0, 0.14);
+  --green: #3be57c;
+  font-size: 13px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  width: 390px;
+  max-height: 590px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 10px 12px 14px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Roboto", "Segoe UI", system-ui, sans-serif;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.hidden { display: none !important; }
+
+/* ------------------------------------------------------------- header */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.brand {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.icon-btn:hover { background: var(--panel-2); color: var(--text); }
+
+/* ---------------------------------------------------------- sections */
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+}
+
+.section-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+section { margin-bottom: 12px; }
+
+/* ------------------------------------------------------------ inputs */
+
+input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  outline: none;
+}
+input[type="text"]:focus { border-color: var(--text-dim); }
+input[type="text"]::placeholder { color: var(--text-dim); }
+
+.add-row { display: flex; gap: 6px; }
+
+.error {
+  margin: 6px 0 0;
+  color: #ff6c6c;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.hint {
+  margin: 2px 0 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* ----------------------------------------------------------- buttons */
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.primary {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  padding: 8px 12px;
+}
+.primary:hover { background: #d90000; }
+.primary:disabled { opacity: 0.55; cursor: default; }
+
+.small { padding: 7px 10px; white-space: nowrap; }
+
+.ghost {
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 7px 10px;
+}
+.ghost:hover { background: #333; }
+.ghost.mini { padding: 3px 7px; font-size: 11px; }
+
+/* ---------------------------------------------------------- playlist */
+
+.playlist-list,
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.playlist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+}
+
+.playlist-row input[type="checkbox"] { accent-color: var(--accent); }
+
+.playlist-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0;
+}
+.playlist-name:not(:disabled):hover { border-color: var(--border); }
+
+.playlist-count { color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+
+.row-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 3px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+.row-btn:hover { background: var(--panel-2); color: var(--text); }
+.row-btn.busy { opacity: 0.4; pointer-events: none; }
+
+/* ------------------------------------------------------------- modes */
+
+.mode-list { display: grid; gap: 5px; }
+
+.mode-card {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.mode-card:hover { background: var(--panel-2); }
+.mode-card input { accent-color: var(--accent); margin-top: 2px; }
+.mode-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+
+.mode-card .mode-info { min-width: 0; }
+.mode-card .mode-label { font-weight: 600; font-size: 12.5px; }
+.mode-card .mode-desc { color: var(--text-dim); font-size: 11px; margin-top: 2px; line-height: 1.4; }
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  cursor: pointer;
+}
+.toggle-row input { accent-color: var(--accent); }
+.toggle-label { font-size: 12.5px; font-weight: 600; }
+.toggle-hint { margin-left: 22px; }
+
+/* ------------------------------------------------------------- actions */
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 6px;
+}
+.actions .primary { flex: 1; }
+
+/* ------------------------------------------------------------ controls */
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+.ctrl-btn {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 4px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ctrl-btn .icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: currentColor;
+}
+.ctrl-btn:hover { background: var(--panel-2); }
+.ctrl-btn.play {
+  background: var(--accent);
+  padding: 6px 9px;
+}
+.ctrl-btn.play .icon { width: 14px; height: 14px; }
+.ctrl-btn.play:hover { background: #d90000; }
+
+.now-playing-box {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+}
+.now-playing {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.queue-position { font-size: 10.5px; margin: 0; }
+
+/* --------------------------------------------------------------- queue */
+
+.queue-list {
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(48, 48, 48, 0.55);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.queue-row:last-child { border-bottom: none; }
+.queue-row:hover { background: var(--panel-2); }
+.queue-row.current {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.queue-index {
+  width: 22px;
+  flex: none;
+  text-align: right;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.queue-thumb {
+  width: 46px;
+  height: 26px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--panel-2);
+}
+
+.queue-track {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.queue-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.queue-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.queue-duration { flex: none; color: var(--text-dim); font-size: 10.5px; }
+.queue-skip-badge { flex: none; font-size: 10px; color: #ff8d8d; }
+.comma { margin-right: 4px; }

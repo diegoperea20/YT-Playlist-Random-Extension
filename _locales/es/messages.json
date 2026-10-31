@@ -1,0 +1,127 @@
+{
+  "app_name": {
+    "message": "YT Playlist Random"
+  },
+  "app_description": {
+    "message": "Mezcla y aleatoriza playlists de YouTube / YouTube Music y reprodúcelas con el reproductor propio de YouTube."
+  },
+
+  "add_placeholder": { "message": "Pega aquí la URL de la playlist" },
+  "add_btn": { "message": "Añadir" },
+  "add_hint": { "message": "Solo playlists públicas o «no listadas»." },
+  "playlists_title": { "message": "Playlists" },
+  "playlists_empty": { "message": "Todavía no hay playlists. Pega arriba la URL de una playlist para empezar." },
+  "refresh_all": { "message": "Recargar todo" },
+  "refresh_one": { "message": "Recargar desde YouTube" },
+  "remove_one": { "message": "Eliminar playlist" },
+  "toggle_in_mix": {
+    "message": "Incluir en la mezcla: $NAME$",
+    "placeholders": { "name": { "content": "$1" } }
+  },
+  "track_count_suffix": { "message": "canciones" },
+
+  "mode_title": { "message": "Modo de mezcla" },
+  "mode_consecutive_random": { "message": "Random consecutivo" },
+  "mode_consecutive_random_desc": {
+    "message": "Alterna entre las playlists y toma una canción al azar sin repetir."
+  },
+  "mode_full_shuffle": { "message": "Mezcla total" },
+  "mode_full_shuffle_desc": {
+    "message": "Mezcla las canciones de todas las playlists en un solo pozo."
+  },
+  "mode_proportional": { "message": "Proporcional" },
+  "mode_proportional_desc": {
+    "message": "Alterna respetando el tamaño relativo de cada playlist."
+  },
+  "mode_sequential_blocks": { "message": "Bloques secuenciales" },
+  "mode_sequential_blocks_desc": {
+    "message": "Reproduce playlist por playlist, cada una mezclada internamente."
+  },
+  "mode_none": { "message": "Sin aleatorización" },
+  "mode_none_desc": { "message": "Concatena las playlists en su orden original." },
+
+  "dedupe": { "message": "Eliminar duplicados" },
+  "dedupe_desc": {
+    "message": "Si una canción está en varias playlists, solo entra una vez."
+  },
+  "reshuffle_rounds": { "message": "Re-mezclar las rondas" },
+  "reshuffle_rounds_desc": {
+    "message": "Cambia el orden de las playlists en cada ronda para más variedad."
+  },
+
+  "mix_play": { "message": "Mezclar y reproducir" },
+  "mix_only": { "message": "Solo mezclar" },
+  "queue_title": { "message": "Cola" },
+  "in_queue": {
+    "message": "$COUNT$ en la cola",
+    "placeholders": { "count": { "content": "$1" } }
+  },
+  "queue_position": {
+    "message": "$INDEX$ / $TOTAL$",
+    "placeholders": {
+      "index": { "content": "$1" },
+      "total": { "content": "$2" }
+    }
+  },
+  "queue_finished": { "message": "La cola se acabó. Vuelve a mezclar para continuar." },
+  "unavailable_badge": { "message": "no disponible" },
+  "nothing_playing": { "message": "Sin reproducción" },
+
+  "play": { "message": "Reproducir" },
+  "pause": { "message": "Pausar" },
+  "prev": { "message": "Pista anterior" },
+  "next_title": { "message": "Pista siguiente" },
+  "options_title": { "message": "Opciones" },
+
+  "default_playlist_label": { "message": "Playlist" },
+  "untitled": { "message": "Sin título" },
+  "unknown_channel": { "message": "Canal desconocido" },
+
+  "options_api_key_label": { "message": "Clave de YouTube Data API v3" },
+  "options_api_key_desc": {
+    "message": "Déjala vacía para usar la clave incluida con la extensión. La clave viaja en cada petición a googleapis.com (no hay servidor); si algún día se filtra, entra aquí y cámbiala."
+  },
+  "options_site_label": { "message": "Sitio de reproducción" },
+  "options_site_desc": {
+    "message": "Dónde suena la cola mezclada. YouTube Music no puede reproducir cualquier video; las pistas incompatibles se saltan automáticamente."
+  },
+  "site_youtube": { "message": "www.youtube.com" },
+  "site_music": { "message": "music.youtube.com" },
+  "save_btn": { "message": "Guardar" },
+  "options_no_key_hint": { "message": "Sin clave configurada — añade una para poder cargar playlists" },
+
+  "err_empty": { "message": "Pega primero la URL de una playlist." },
+  "err_invalid_url": { "message": "Eso no es una URL válida." },
+  "err_unsupported_host": { "message": "Solo se admiten URLs de YouTube o YouTube Music." },
+  "err_missing_list_param": {
+    "message": "La URL apunta a /playlist pero sin el parámetro «list»."
+  },
+  "err_not_a_playlist": {
+    "message": "Esa URL no tiene playlist. Usa una URL con «list=…» (una playlist o un video que la incluya)."
+  },
+  "err_auto_mix": {
+    "message": "Las mezclas automáticas («RD…») no se pueden leer con la Data API."
+  },
+  "err_liked_music": {
+    "message": "«Liked music» y listas privadas («LL»/«WL») no son accesibles."
+  },
+  "err_missing_api_key": {
+    "message": "No hay clave de API. Configúrala en las opciones de la extensión (menú de la extensión → Opciones)."
+  },
+  "err_playlist_not_found": {
+    "message": "Playlist no encontrada. Revisa la URL (debe ser pública o «no listada»)."
+  },
+  "err_playlist_not_accessible": {
+    "message": "La playlist no es accesible con esta clave de API."
+  },
+  "err_quota_exceeded": {
+    "message": "Cuota de la API de YouTube agotada. Prueba más tarde o con otra clave."
+  },
+  "err_forbidden": { "message": "YouTube rechazó la clave de API (403)." },
+  "err_no_active_playlists": { "message": "Añade al menos una playlist y márcala activa." },
+  "err_no_tracks": {
+    "message": "No queda ninguna canción disponible tras aplicar el filtro de duplicados."
+  },
+  "err_no_queue": { "message": "Genera primero la cola con «Mezclar»." },
+  "err_unknown": { "message": "Error inesperado. Revisa la URL o inténtalo de nuevo." }
+}
