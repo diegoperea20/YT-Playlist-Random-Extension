@@ -341,25 +341,29 @@ async function handleMessage(message, sender) {
 
     // -------------------------------------------------------- queue + playback
     case 'shuffle': {
+      // Playlists que participan en la mezcla = las marcadas como activas.
+      // IMPORTANTE: se guardan todas, solo se mezclan las activas (bug: antes
+      // se persistía la lista filtrada y borraba las no marcadas).
       const settings = await getSettings()
-      const playlists = (await getPlaylists()).filter((p) => p.active)
-      if (playlists.length === 0) {
+      const allPlaylists = await getPlaylists()
+      const active = allPlaylists.filter((p) => p.active)
+      if (active.length === 0) {
         throw new YoutubeApiError('no-active-playlists')
       }
 
       // Reload tracks for brand-new or emptied playlists before mixing.
       const apiKey = requireApiKey(settings.apiKey, BUNDLED_API_KEY)
       const fallbacks = { untitled: ui('untitled'), unknownChannel: ui('unknown_channel') }
-      for (const playlist of playlists) {
+      for (const playlist of active) {
         if (!playlist.tracks?.length) {
           const { tracks } = await loadPlaylistTracks(playlist.id, apiKey, fallbacks)
           playlist.tracks = tracks
           playlist.loadedAt = Date.now()
         }
       }
-      await savePlaylists(playlists) // persist any reload above
+      await savePlaylists(allPlaylists) // persist any reload above (full list!)
 
-      const plain = playlists.filter((p) => (p.tracks ?? []).length > 0)
+      const plain = active.filter((p) => (p.tracks ?? []).length > 0)
       const tracks = generateQueue(settings.mode, plain, {
         dedupe: settings.dedupe,
         reshuffleRounds: settings.reshuffleRounds,
