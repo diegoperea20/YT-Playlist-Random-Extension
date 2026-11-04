@@ -83,8 +83,10 @@ async function currentTrack() {
  * Reuse the playback tab when alive and on the right host; otherwise activate the
  * first matching YouTube tab; otherwise open a new one pointed straight at the
  * current track (the site's own player autoplays it).
+ * NEVER hijacks the tab the user is looking at: only background tabs are
+ * reused, and fresh tabs can stay in the background too (activateOnCreate).
  */
-async function ensurePlaybackTab(site) {
+async function ensurePlaybackTab(site, activateOnCreate = false) {
   const playback = await getPlayback()
   const host = site === 'music' ? 'music.youtube.com' : 'www.youtube.com'
   const pattern = `https://${host}/*`
@@ -101,14 +103,23 @@ async function ensurePlaybackTab(site) {
   }
 
   const candidates = await chrome.tabs.query({ url: pattern })
+  // Prefer a background tab: navigating the visible tab would hijack it and
+  // start a second playback.
+  const background = candidates.find((t) => !t.active)
+  if (background) {
+    await savePlayback({ ...(await getPlayback()), tabId: background.id })
+    return { tab: background, fresh: false }
+  }
   if (candidates.length > 0) {
-    const tab = candidates[0]
+    // The only matching tab is the one the user is looking at: leave it alone
+    // and open a dedicated background playback tab on the current track.
+    const tab = await chrome.tabs.create({ url: targetUrl, active: false })
     await savePlayback({ ...(await getPlayback()), tabId: tab.id })
-    return { tab, fresh: false }
+    return { tab, fresh: true }
   }
 
   // No suitable tab: create one already on the current track.
-  const tab = await chrome.tabs.create({ url: targetUrl, active: true })
+  const tab = await chrome.tabs.create({ url: targetUrl, active: activateOnCreate })
   await savePlayback({ ...(await getPlayback()), tabId: tab.id })
   return { tab, fresh: true }
 }
@@ -116,16 +127,86 @@ async function ensurePlaybackTab(site) {
 /**
  * THE playback path: hand the track to YouTube's own player by navigating the
  * playback tab to its native watch URL (full reloads are fine).
+ *
+ * ANTI-HIJACK (the user reported a queue click NAVIGATING the tab they were
+ * watching a video in): the stored playback tab may long ago have been taken
+ * back by the user (they browse YouTube in it now). Trust only LIVE evidence:
+ * if the tab about to receive the queue's track is the one they are LOOKING
+ * at and it no longer shows the worker's recorded track, refuse to hijack it
+ * and redirect to another background tab / a dedicated background tab.
  */
 async function navigateToCurrentTrack(tabId) {
   const track = await currentTrack()
   if (!track?.id) return
   const settings = await getSettings()
   const playback = await getPlayback()
-  // Navigating IS commanding the tab: our own track changes always take
-  // ownership back (e.g. after a previous lostControl backoff).
-  await savePlayback({ ...playback, videoId: track.id, lostControl: false })
-  await chrome.tabs.update(tabId, { url: watchUrl(settings.site, track.id) })
+
+  let targetId = tabId
+  let targetTab = null
+  try {
+    targetTab = await chrome.tabs.get(targetId)
+  } catch {
+    targetTab = null
+  }
+  let fg = null
+  try {
+    const looked = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+    fg = looked?.[0] ?? null
+  } catch {
+    // No focused window (screen locked, minimized): nothing to preserve.
+  }
+
+  const pageVideo = targetTab?.url
+    ? (new URL(targetTab.url).searchParams.get('v') ?? null)
+    : null
+
+  // Dead/unknown tab, or the visible tab no longer holds the queue's video:
+  // the worker's tab state must lose against what the user is actually
+  // seeing. Re-resolve: another background tab on the right host (never the
+  // visible one) or a dedicated background playback tab.
+  if (!targetTab?.url || (fg && fg.id === targetId && pageVideo !== playback.videoId)) {
+    const host = settings.site === 'music' ? 'music.youtube.com' : 'www.youtube.com'
+    const alt = await chrome.tabs
+      .query({ url: `https://${host}/*` })
+      .then((tabs) => tabs.find((t) => !t.active))
+      .catch(() => undefined)
+    if (alt && alt.id !== targetId) {
+      targetId = alt.id
+    } else {
+      const fresh = await chrome.tabs.create({
+        url: watchUrl(settings.site, track.id),
+        active: false,
+      })
+      targetId = fresh.id
+    }
+    await savePlayback({ ...playback, tabId: targetId, videoId: track.id, lostControl: false })
+  } else {
+    // OWN navigation: always takes ownership back (e.g. lostControl backoff).
+    await savePlayback({ ...playback, videoId: track.id, lostControl: false })
+  }
+
+  await chrome.tabs.update(targetId, { url: watchUrl(settings.site, track.id) })
+
+  // FOCUS PRESERVATION: if something raises the playback tab after this
+  // navigation (Chrome can, even for a background tabs.update), hand the
+  // user's view back. A focus change to any OTHER tab is user action.
+  if (!fg || fg.id === targetId) return
+  for (const delay of [500, 1500, 3000, 6000]) {
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const still = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+          const active = still?.[0]
+          if (!active || active.id === fg.id) return // focus back on the user
+          if (active.id !== targetId) return // user moved elsewhere: respect it
+          await chrome.tabs.update(fg.id, { active: true })
+          await chrome.windows.update(fg.windowId, { focused: true })
+        } catch {
+          // Captured tab/window may be gone; best effort only.
+        }
+      })()
+    }, delay)
+  }
 }
 
 /** Resume playback of the track already loaded in the tab, without navigating. */
@@ -156,8 +237,17 @@ async function advanceQueue(tabId) {
 
   const playback = await getPlayback()
   if (playback.playing) {
-    const tabId = playback.tabId ?? tabId
-    if (tabId != null) await navigateToCurrentTrack(tabId)
+    const targetId = playback.tabId ?? tabId
+    if (targetId != null) {
+      try {
+        await navigateToCurrentTrack(targetId)
+      } catch {
+        // The playback tab died mid-queue: re-resolve it without hijacking
+        // the tab the user is looking at.
+        const { tab } = await ensurePlaybackTab((await getSettings()).site)
+        await navigateToCurrentTrack(tab.id)
+      }
+    }
   }
   return { action: 'next', index: nextIndex, videoId: queue.queue[nextIndex].id }
 }
@@ -188,6 +278,24 @@ async function handleTrackSkip(tabId, videoId) {
     } catch { /* best effort */ }
   }
   return advanceQueue(tabId)
+}
+
+/** Pause only a tab that genuinely holds the queue's track (LIVE evidence). */
+async function pausePlaybackTab() {
+  const playback = await getPlayback()
+  if (playback.tabId == null) return false
+  try {
+    const tab = await chrome.tabs.get(playback.tabId)
+    const pageVideo = tab?.url ? (new URL(tab.url).searchParams.get('v') ?? null) : null
+    if (pageVideo && playback.videoId && pageVideo !== playback.videoId) {
+      // The user took this tab back (shows another video): don't touch it.
+      return false
+    }
+    await chrome.tabs.sendMessage(playback.tabId, { type: 'pause-video' })
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +495,8 @@ async function handleMessage(message, sender) {
       await savePlayback(playback)
 
       if (message.andPlay) {
-        const { tab, fresh } = await ensurePlaybackTab(settings.site)
+        // The user explicitly asked to play: a FRESH tab may be raised.
+        const { tab, fresh } = await ensurePlaybackTab(settings.site, true)
         await savePlayback({ ...(await getPlayback()), playing: true })
         // A fresh tab already opens on the current watch URL; otherwise navigate.
         if (!fresh) await navigateToCurrentTrack(tab.id)
@@ -415,14 +524,24 @@ async function handleMessage(message, sender) {
         await navigateToCurrentTrack(tab.id)
       } else {
         await savePlayback({ ...playback, playing: false, lostControl: false })
-        await sendMessageToPlaybackTab({ type: 'pause-video' })
+        await pausePlaybackTab()
       }
       return { ok: true }
     }
 
     case 'next': {
       const playback = await getPlayback()
-      const tabId = playback.tabId ?? (await ensurePlaybackTab((await getSettings()).site)).tab.id
+      let tabId = playback.tabId
+      if (tabId != null) {
+        try {
+          await chrome.tabs.get(tabId)
+        } catch {
+          tabId = null // The playback tab is gone; re-resolve it.
+        }
+      }
+      if (tabId == null) {
+        tabId = (await ensurePlaybackTab((await getSettings()).site)).tab.id
+      }
       return await advanceQueue(tabId)
     }
 
