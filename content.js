@@ -149,48 +149,65 @@
 
   /**
    * Chrome/Brave media keys and the browser's media hub (Previous / Next /
-   * Play / Pause) drive the SAME commands the popup sends. The handlers are
-   * bound ONLY while the background says this tab belongs to the shuffled
-   * queue (`get-media-session` → owned), so normal YouTube browsing is never
-   * hijacked. Re-asserting on every `play` event also widens the race against
-   * YouTube re-registering its own handlers for the same page.
+   * Play / Pause) drive the SAME commands the popup sends. Chrome may route a
+   * media key to the session of whichever YouTube tab the user is LOOKING at,
+   * not the one playing the queue — so the binding is level-based:
+   *
+   *   full — this tab IS the playback tab, on the queue's current track:
+   *          next/prev/play/pause/stop all drive the queue.
+   *   next — the queue is playing elsewhere but this tab is idle/not the
+   *          playback tab: ONLY next/prev advance the queue (the hub's ⏭/⏮
+   *          must reach the ONE playing tab, never spawn a second one), and
+   *          play/pause stay native so the user's own video is never hijacked.
+   *   off  — no active queue (or the user is actively watching a video here):
+   *          everything stays native.
    */
-  let mediaSessionActive = false
-  let mediaOwned = false
+  let mediaLevel = 'off' // 'full' | 'next' | 'off'
+  let lastOwned = false
+  let lastQueuePlaying = false
+  const MEDIA_ACTIONS = ['nexttrack', 'previoustrack', 'play', 'pause', 'stop']
 
-  function installMediaSessionActions() {
-    if (!('mediaSession' in navigator)) return
-    mediaSessionActive = true
-    try {
-      navigator.mediaSession.setActionHandler('nexttrack', () => {
-        chrome.runtime.sendMessage({ type: 'next' }).catch(() => {})
-      })
-      navigator.mediaSession.setActionHandler('previoustrack', () => {
-        chrome.runtime.sendMessage({ type: 'prev' }).catch(() => {})
-      })
-      navigator.mediaSession.setActionHandler('play', () => {
-        chrome.runtime.sendMessage({ type: 'set-playing', value: true }).catch(() => {})
-      })
-      navigator.mediaSession.setActionHandler('pause', () => {
-        chrome.runtime.sendMessage({ type: 'set-playing', value: false }).catch(() => {})
-      })
-      navigator.mediaSession.setActionHandler('stop', () => {
-        chrome.runtime.sendMessage({ type: 'set-playing', value: false }).catch(() => {})
-      })
-    } catch (error) {
-      console.warn('[YPR] Media Session error:', error)
-    }
+  function sendQueueMessage(type, extra = {}) {
+    chrome.runtime.sendMessage({ type, ...extra }).catch(() => {})
   }
 
-  function releaseMediaSessionActions() {
-    if (!('mediaSession' in navigator) || !mediaSessionActive) return
-    mediaSessionActive = false
+  /** Is the user actually watching something in this tab right now? */
+  function isTabBusyPlaying() {
+    const video = document.querySelector('video')
+    return Boolean(video && !video.paused && video.readyState >= 2)
+  }
+
+  function effectiveMediaLevel() {
+    if (lastOwned) return 'full'
+    if (lastQueuePlaying && !isTabBusyPlaying()) return 'next'
+    return 'off'
+  }
+
+  function setMediaLevel(level) {
+    if (!('mediaSession' in navigator)) return
+    if (level === 'off' && mediaLevel === 'off') return // already idle, nothing to release
+    mediaLevel = level
     try {
-      for (const action of ['nexttrack', 'previoustrack', 'play', 'pause', 'stop']) {
-        navigator.mediaSession.setActionHandler(action, null)
+      if (level === 'full') {
+        navigator.mediaSession.setActionHandler('nexttrack', () => sendQueueMessage('next'))
+        navigator.mediaSession.setActionHandler('previoustrack', () => sendQueueMessage('prev'))
+        navigator.mediaSession.setActionHandler('play', () => sendQueueMessage('set-playing', { value: true }))
+        navigator.mediaSession.setActionHandler('pause', () => sendQueueMessage('set-playing', { value: false }))
+        navigator.mediaSession.setActionHandler('stop', () => sendQueueMessage('set-playing', { value: false }))
+      } else if (level === 'next') {
+        navigator.mediaSession.setActionHandler('nexttrack', () => sendQueueMessage('next'))
+        navigator.mediaSession.setActionHandler('previoustrack', () => sendQueueMessage('prev'))
+        // Avoid stale full-bindings: play/pause must not affect the queue here.
+        navigator.mediaSession.setActionHandler('play', null)
+        navigator.mediaSession.setActionHandler('pause', null)
+        navigator.mediaSession.setActionHandler('stop', null)
+      } else {
+        for (const action of MEDIA_ACTIONS) {
+          navigator.mediaSession.setActionHandler(action, null)
+        }
       }
-    } catch {
-      // noop
+    } catch (error) {
+      console.warn('[YPR] Media Session error:', error)
     }
   }
 
@@ -199,28 +216,28 @@
     chrome.runtime
       .sendMessage({ type: 'get-media-session' })
       .then((reply) => {
-        setMediaOwned(Boolean(reply?.owned))
+        lastOwned = Boolean(reply?.owned)
+        lastQueuePlaying = Boolean(reply?.queuePlaying)
+        setMediaLevel(effectiveMediaLevel())
       })
       .catch(() => {})
   }
 
-  /** Apply an already-decided ownership verdict (from background or locally). */
-  function setMediaOwned(value) {
-    mediaOwned = value
-    if (mediaOwned) installMediaSessionActions()
-    else releaseMediaSessionActions()
+  /** Apply an ownership verdict that did not come from `get-media-session`. */
+  function setOwnedVerdict(value) {
+    lastOwned = Boolean(value)
+    setMediaLevel(effectiveMediaLevel())
   }
 
   /**
    * YouTube re-registers its own media handlers at unpredictable moments
    * (metadata load, SPA refresh...) and the LAST registration wins. Binding
    * ours exactly once per page is not enough — that is why the next-key died
-   * after a track or two. While the queue owns this tab, re-assert the
-   * handlers on a short honor-local interval: cheap, and it never wakes the
-   * service worker by itself.
+   * after a track or two. Re-assert (and possibly upgrade/downgrade) on a
+   * short local interval: cheap, and it never wakes the service worker.
    */
   setInterval(() => {
-    if (mediaOwned) installMediaSessionActions()
+    setMediaLevel(effectiveMediaLevel())
   }, 2000)
 
   // ------------------------------------------------------------------ ended
@@ -357,8 +374,8 @@
       .sendMessage({ type: 'yt-navigation', videoId })
       .then((reply) => {
         // The page landed exactly where the queue expects it: ours. Otherwise
-        // (native autoplay / manual navigation) release the keys.
-        setMediaOwned(Boolean(reply?.owned))
+        // (native autoplay / manual navigation) downgrade accordingly.
+        if (reply && 'owned' in reply) setOwnedVerdict(reply.owned)
       })
       .catch(() => {})
     // Give every fresh watch page up to a few nudges to start on its own.

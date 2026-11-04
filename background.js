@@ -468,7 +468,13 @@ async function handleMessage(message, sender) {
           !playback.lostControl &&
           current.id === pageVideoId,
       )
-      return { ok: true, owned }
+      // queuePlaying: the shuffled queue is actively playing in ITS tab.
+      // Chrome may route a media key to whichever YouTube tab the user is
+      // LOOKING at, so EVERY idle YouTube tab gets the ⏭/⏮ binding while the
+      // queue plays — the key must reach the ONE playback tab, never spawn a
+      // second playing tab. Content decides locally whether this tab is busy.
+      const queuePlaying = Boolean(current && playback.playing && !playback.lostControl)
+      return { ok: true, owned, queuePlaying }
     }
 
     case 'content-ready': {
@@ -482,11 +488,17 @@ async function handleMessage(message, sender) {
       // The tab landed back on the queue's current track: the worker is
       // commanding it again, so any lostControl backoff is over.
       const pageMatchesQueue = Boolean(track && pageVideoId && track.id === pageVideoId)
+      // tabId fencing: a random YouTube tab the user opens must NEVER steal
+      // the playback role. Only the already-known playback tab — or a page
+      // showing the queue's current track while no tab is known yet — may.
+      const senderTabId = sender?.tab?.id ?? null
+      const isKnownPlaybackTab = senderTabId != null && senderTabId === playback.tabId
+      const takesOwnership = isKnownPlaybackTab || (playback.tabId == null && pageMatchesQueue)
       await savePlayback({
         ...playback,
-        tabId: sender?.tab?.id ?? playback.tabId,
-        videoId: pageVideoId ?? playback.videoId,
-        lostControl: pageMatchesQueue ? false : playback.lostControl,
+        tabId: takesOwnership && senderTabId != null ? senderTabId : playback.tabId,
+        videoId: takesOwnership ? (pageVideoId ?? playback.videoId) : playback.videoId,
+        lostControl: pageMatchesQueue && takesOwnership ? false : playback.lostControl,
       })
 
       // Never navigate from here (that would reload forever): the page that just
@@ -499,10 +511,21 @@ async function handleMessage(message, sender) {
 
     case 'play-state': {
       const playback = await getPlayback()
+      // tabId fencing (see content-ready): pause/play events coming from a
+      // random YouTube tab must never re-target the queue's playback tab or
+      // pollute the queue's playing state — that is how "next" ended up
+      // navigating the user's browsing tab instead of the music one.
+      const senderTabId = sender?.tab?.id ?? null
+      const isKnownPlaybackTab = senderTabId != null && senderTabId === playback.tabId
+      const queue = await getQueueState()
+      const current = queue?.queue?.[queue.index ?? 0]
+      const trackMatches = Boolean(current && message.videoId && current.id === message.videoId)
+      const takesOwnership = isKnownPlaybackTab || (playback.tabId == null && trackMatches)
+      if (!takesOwnership) return { ok: true } // foreign tab: not our playback state
       await savePlayback({
         ...playback,
         playing: message.playing ?? playback.playing,
-        tabId: sender?.tab?.id ?? playback.tabId,
+        tabId: senderTabId ?? playback.tabId,
         videoId: message.videoId ?? playback.videoId,
       })
       return { ok: true }
