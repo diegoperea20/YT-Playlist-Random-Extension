@@ -30,7 +30,7 @@ content.js (on youtube.com / music.youtube.com) ◀─────────�
 | `manifest.json` | MV3. Service worker of type **module** (uses `import`). Permissions: `storage`, `tabs`. Host perms: `googleapis.com` (Data API), `*.youtube.com`, `*.ytimg.com`. Content script only on `www.youtube.com` and `music.youtube.com` (excludes `/embed/` and `live_chat`), `run_at: document_idle`. |
 | `background.js` | **Service worker (main).** Message router, queue, playback-tab management, storage. See "Message protocol" below. |
 | `content.js` | Adapter of the native player inside the YouTube page (anonymous IIFE, marked with `window.__yprContentLoaded`). |
-| `popup.js` + `index.html` + `popup.css` | Popup UI: playlists, shuffle modes, queue, ▶/⏸/⏮/⏭ controls, `setInterval(refresh, 1000)` polling. |
+| `popup.js` + `index.html` + `popup.css` | Popup UI: playlists, shuffle modes, queue, ▶/⏸/⏮/⏭ controls, `setInterval(refresh, 1000)` polling. The queue auto-scrolls to the current track (`lastAutoScrollKey` = `generatedAt#index`) only when the position actually moved — never on the 1s re-render, so user scrolling is respected. |
 | `options.js` + `options.html` | Options page: API key override (empty = bundled key) and playback site (`youtube` / `music`). |
 | `lib/api.js` | YouTube Data API v3 directly from the worker: paginated `playlistItems` (50/page, 1 unit/page), durations in batches of 50 (`videos`, 1 unit), title (`playlists`, 1 unit). Maps HTTP errors to internal codes. |
 | `lib/shuffle/` | 5 shuffle engines ported 1:1 from the web project (see below). |
