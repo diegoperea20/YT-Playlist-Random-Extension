@@ -25,11 +25,15 @@
     switch (message?.type) {
       case 'pause-video':
         pauseVideo()
+        // A worker command means it is actively managing us again: re-sync
+        // the media keys (the ownership verdict may have just changed).
+        publishMediaSessionActions()
         sendResponse({ ok: true })
         return false
 
       case 'resume-video':
         resumeVideo()
+        publishMediaSessionActions()
         // Give the player a moment, then report what actually happened.
         setTimeout(() => {
           const video = document.querySelector('video')
@@ -141,6 +145,84 @@
     }
   }
 
+  // ---------------------------------------------------- media session (⏭/⏮)
+
+  /**
+   * Chrome/Brave media keys and the browser's media hub (Previous / Next /
+   * Play / Pause) drive the SAME commands the popup sends. The handlers are
+   * bound ONLY while the background says this tab belongs to the shuffled
+   * queue (`get-media-session` → owned), so normal YouTube browsing is never
+   * hijacked. Re-asserting on every `play` event also widens the race against
+   * YouTube re-registering its own handlers for the same page.
+   */
+  let mediaSessionActive = false
+  let mediaOwned = false
+
+  function installMediaSessionActions() {
+    if (!('mediaSession' in navigator)) return
+    mediaSessionActive = true
+    try {
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        chrome.runtime.sendMessage({ type: 'next' }).catch(() => {})
+      })
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        chrome.runtime.sendMessage({ type: 'prev' }).catch(() => {})
+      })
+      navigator.mediaSession.setActionHandler('play', () => {
+        chrome.runtime.sendMessage({ type: 'set-playing', value: true }).catch(() => {})
+      })
+      navigator.mediaSession.setActionHandler('pause', () => {
+        chrome.runtime.sendMessage({ type: 'set-playing', value: false }).catch(() => {})
+      })
+      navigator.mediaSession.setActionHandler('stop', () => {
+        chrome.runtime.sendMessage({ type: 'set-playing', value: false }).catch(() => {})
+      })
+    } catch (error) {
+      console.warn('[YPR] Media Session error:', error)
+    }
+  }
+
+  function releaseMediaSessionActions() {
+    if (!('mediaSession' in navigator) || !mediaSessionActive) return
+    mediaSessionActive = false
+    try {
+      for (const action of ['nexttrack', 'previoustrack', 'play', 'pause', 'stop']) {
+        navigator.mediaSession.setActionHandler(action, null)
+      }
+    } catch {
+      // noop
+    }
+  }
+
+  function publishMediaSessionActions() {
+    if (!('mediaSession' in navigator)) return
+    chrome.runtime
+      .sendMessage({ type: 'get-media-session' })
+      .then((reply) => {
+        setMediaOwned(Boolean(reply?.owned))
+      })
+      .catch(() => {})
+  }
+
+  /** Apply an already-decided ownership verdict (from background or locally). */
+  function setMediaOwned(value) {
+    mediaOwned = value
+    if (mediaOwned) installMediaSessionActions()
+    else releaseMediaSessionActions()
+  }
+
+  /**
+   * YouTube re-registers its own media handlers at unpredictable moments
+   * (metadata load, SPA refresh...) and the LAST registration wins. Binding
+   * ours exactly once per page is not enough — that is why the next-key died
+   * after a track or two. While the queue owns this tab, re-assert the
+   * handlers on a short honor-local interval: cheap, and it never wakes the
+   * service worker by itself.
+   */
+  setInterval(() => {
+    if (mediaOwned) installMediaSessionActions()
+  }, 2000)
+
   // ------------------------------------------------------------------ ended
 
   function attachEnded(video) {
@@ -162,6 +244,9 @@
       chrome.runtime
         .sendMessage({ type: 'play-state', playing: true, videoId: currentVideoIdNow() })
         .catch(() => {})
+      // YouTube may have re-registered its own media handlers on this page;
+      // re-assert ours whenever playback actually starts.
+      publishMediaSessionActions()
     })
 
     video.addEventListener('pause', () => {
@@ -265,9 +350,17 @@
   function onPageReady() {
     attachEndedToAll()
     disableNativeAutoplayToggle()
+    publishMediaSessionActions()
     const videoId = new URLSearchParams(location.search).get('v')
     if (!videoId || location.pathname !== '/watch') return
-    chrome.runtime.sendMessage({ type: 'yt-navigation', videoId }).catch(() => {})
+    chrome.runtime
+      .sendMessage({ type: 'yt-navigation', videoId })
+      .then((reply) => {
+        // The page landed exactly where the queue expects it: ours. Otherwise
+        // (native autoplay / manual navigation) release the keys.
+        setMediaOwned(Boolean(reply?.owned))
+      })
+      .catch(() => {})
     // Give every fresh watch page up to a few nudges to start on its own.
     ensurePagePlaying(videoId)
     setTimeout(() => ensurePagePlaying(videoId, true), 1500)
@@ -286,6 +379,9 @@
       if (reply?.kick && reply.videoId && currentVideoIdNow() === reply.videoId) {
         ensurePagePlaying(reply.videoId, true)
       }
+      // The background just settled this tab's ownership state; ask for media
+      // binding again (a fresh playback tab raced against the earlier check).
+      publishMediaSessionActions()
     })
     .catch(() => {})
 })()

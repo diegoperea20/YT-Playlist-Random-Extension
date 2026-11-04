@@ -80,7 +80,8 @@ Almost everything goes through `chrome.runtime.sendMessage` and responds `{ ok: 
 | content | `play-state {playing, videoId}` | Syncs `playback` with what the player is actually doing. |
 | content | `track-ended {videoId}` | Pause already done by content; worker advances the queue (`advanceQueue`). |
 | content | `player-error {videoId}` | Marks the track `available:false` in ALL stored playlists, notifies `ignore-ended`, and skips like a normal end of track. |
-| content | `yt-navigation {videoId}` | The page changed video without a command (native autoplay or user navigation): worker stops talking to that tab (`lostControl`) until the user presses play. |
+| content | `yt-navigation {videoId}` | The page changed video without a command (native autoplay or user navigation): worker stops talking to that tab (`lostControl`) until the user presses play. Responds `{ owned: bool }` so content.js binds/releases the media keys. |
+| content | `get-media-session` | Asks whether THIS tab belongs to the shuffled queue (playback tab, on the queue's current track, no `lostControl`). Content.js binds media keys only when `owned: true`. |
 
 ## State in `chrome.storage`
 
@@ -89,7 +90,7 @@ Almost everything goes through `chrome.runtime.sendMessage` and responds `{ ok: 
 | `local` | `settings` | `{ mode, dedupe, reshuffleRounds, site ('youtube'\|'music'), apiKey (empty = bundled) }` — always merge with `DEFAULT_SETTINGS`. |
 | `local` | `playlists` | `[{ id, label, url, tracks: Track[], loadedAt, active }]`. 5 min cache per playlist via `loadedAt` (the UI refreshes with buttons). |
 | `session` | `queueState` | `{ queue: Track[], index, mode, generatedAt }`. |
-| `session` | `playback` | `{ playing, tabId, videoId }` (+ `lostControl` when YT took over the tab). |
+| `session` | `playback` | `{ playing, tabId, videoId }` (+ `lostControl` when YT took over the tab; cleared whenever the worker or the user commands playback again). |
 
 **Track:** `{ id, title, channel, thumbnail, durationSec, playlistId, available }` (see `lib/types.js`).
 
@@ -125,10 +126,11 @@ bash generate-config.sh        # or ./generate-config.sh (+x bit in the repo)
 2. **Immediate pause on `ended`** (`content.js::attachEnded`): it is the only thing that prevents YouTube's native autoplay from stealing the tab at the end of each video.
 3. **Never mark "unavailable" for buffering**: only `playerError` (100/101/150), `.ytp-error` in the DOM, no `<video>` after ~10 s, or hard pause after ~13 s (`content.js::watchForUnavailable`). That's where the thresholds live: 8 s (nudge), 13 s (skip), 10 s (no video) and total watch duration 14 s.
 4. **Resume in place**: ▶/⏸ pause of the SAME track does not reload the page (`tryResumeInPlace` compares `playback.videoId` with the current track); changing tracks does navigate.
-5. **`yt-navigation` backoff**: if YouTube changed the video without our command, `lostControl` is set and the worker stops talking to that tab until a new `set-playing`.
+5. **`yt-navigation` backoff**: if YouTube changed the video without our command, `lostControl` is set and the worker stops talking to that tab until a new `set-playing` (also cleared by `navigateToCurrentTrack` and a matching `content-ready`).
 6. **MV3 lifecycle**: the `chrome.runtime.onMessage` listener **always returns `true`** (async response) and uses asynchronous sendResponse — don't change it to `promise` without verification, the API still requires `true`.
 7. **Impossible playlists**: the public API CANNOT read `RD…` (mixes), `LL`/`WL` (liked/watch later) or private ones — `lib/parseUrl.js` rejects them with specific reasons; don't try to "fix" it with more permissions.
 8. **Anti-duplicate guards**: the content script runs again after every YouTube SPA navigation. Everything repeatable is protected: `video.dataset.__yprEnded` avoids re-attaching the `ended` listener to the same `<video>`, `reportedErrors` (Set) avoids watching the same videoId twice, `sessionStorage.__yprAutoplayOff` avoids re-clicking the autoplay toggle on every page, and `window.__yprContentLoaded` avoids double init of the whole script. The `MutationObserver` is the one that re-attaches listeners when the DOM changes.
+9. **Media keys**: the Media Session handlers ⏭/⏮/⏯ bind ONLY when `get-media-session` answers `owned` (playback tab + page on the queue's current track + no `lostControl`); they must be released on any other navigation (`yt-navigation` answers `{ owned: false }`). YouTube re-registers its own handlers at unpredictable moments and the LAST registration wins, so binding once per page is NOT enough (the next-key died after a track or two): `content.js` re-asserts the handlers on every `play` event, on every page load, on worker commands (`pause-video`/`resume-video`) AND on a 2s interval gated by a local `mediaOwned` flag — the interval never queries the worker by itself. Never bind them unconditionally — it would hijack normal YouTube browsing.
 
 ## How to test changes
 

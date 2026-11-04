@@ -122,7 +122,9 @@ async function navigateToCurrentTrack(tabId) {
   if (!track?.id) return
   const settings = await getSettings()
   const playback = await getPlayback()
-  await savePlayback({ ...playback, videoId: track.id })
+  // Navigating IS commanding the tab: our own track changes always take
+  // ownership back (e.g. after a previous lostControl backoff).
+  await savePlayback({ ...playback, videoId: track.id, lostControl: false })
   await chrome.tabs.update(tabId, { url: watchUrl(settings.site, track.id) })
 }
 
@@ -403,7 +405,8 @@ async function handleMessage(message, sender) {
           throw new YoutubeApiError('no-queue')
         }
         const track = queue.queue[queue.index ?? 0]
-        await savePlayback({ ...playback, playing: true })
+        // The user pressed play: any previous accounted loss of this tab is over.
+        await savePlayback({ ...playback, playing: true, lostControl: false })
         // The same video is still loaded in the playback tab: resume in place.
         if (await tryResumeInPlace(playback, track)) return { ok: true, resumed: true }
         const settings = await getSettings()
@@ -411,7 +414,7 @@ async function handleMessage(message, sender) {
         await savePlayback({ ...(await getPlayback()), tabId: tab.id, playing: true })
         await navigateToCurrentTrack(tab.id)
       } else {
-        await savePlayback({ ...playback, playing: false })
+        await savePlayback({ ...playback, playing: false, lostControl: false })
         await sendMessageToPlaybackTab({ type: 'pause-video' })
       }
       return { ok: true }
@@ -449,6 +452,25 @@ async function handleMessage(message, sender) {
     }
 
     // ----------------------------------------------------------- from content.js
+    case 'get-media-session': {
+      // Media keys (⏭/⏮/⏯) may bind ONLY while the tab genuinely belongs to the
+      // shuffled queue: playback tab, on the queue's current track and with the
+      // worker in control (no lostControl backoff).
+      const [queue, playback] = await Promise.all([getQueueState(), getPlayback()])
+      const current = queue?.queue?.[queue.index ?? 0]
+      const pageVideoId = sender?.tab?.url
+        ? (new URL(sender.tab.url).searchParams.get('v') ?? null)
+        : null
+      const owned = Boolean(
+        current &&
+          playback.tabId != null &&
+          sender?.tab?.id === playback.tabId &&
+          !playback.lostControl &&
+          current.id === pageVideoId,
+      )
+      return { ok: true, owned }
+    }
+
     case 'content-ready': {
       const playback = await getPlayback()
       const queue = await getQueueState()
@@ -457,10 +479,14 @@ async function handleMessage(message, sender) {
         ? (new URL(sender.tab.url).searchParams.get('v') ?? null)
         : null
 
+      // The tab landed back on the queue's current track: the worker is
+      // commanding it again, so any lostControl backoff is over.
+      const pageMatchesQueue = Boolean(track && pageVideoId && track.id === pageVideoId)
       await savePlayback({
         ...playback,
         tabId: sender?.tab?.id ?? playback.tabId,
         videoId: pageVideoId ?? playback.videoId,
+        lostControl: pageMatchesQueue ? false : playback.lostControl,
       })
 
       // Never navigate from here (that would reload forever): the page that just
@@ -498,7 +524,11 @@ async function handleMessage(message, sender) {
       // Either way, stop commanding this tab until the user presses play again.
       const queue = await getQueueState()
       const current = queue?.queue?.[queue.index ?? 0]
-      if (!current || current.id === message.videoId) return { ok: true }
+      // owned: the page is exactly where the queue expects it (our own
+      // navigation, normal case) — content.js uses that to bind or release the
+      // media session keys.
+      if (!current) return { ok: true, owned: false }
+      if (current.id === message.videoId) return { ok: true, owned: true }
 
       const playback = await getPlayback()
       const touched = playback.tabId != null && sender?.tab?.id === playback.tabId
