@@ -126,6 +126,10 @@ function showGenError(code) {
 
 // ---------------------------------------------------------------- render
 
+// Last queue position the auto-scroll followed (generatedAt + index), so the
+// view only follows actual track changes, not every 1s re-render.
+let lastAutoScrollKey = null
+
 function render() {
   const { settings, playlists, queue, playback } = state
   if (!settings) return
@@ -253,12 +257,14 @@ function renderQueue(queue) {
   const playback = state.playback
   const currentIndex = queue.index ?? 0
   el.queueList.replaceChildren()
+  let currentBtn = null
 
   const fragment = document.createDocumentFragment()
   queue.queue.forEach((track, index) => {
     const li = document.createElement('li')
     const btn = document.createElement('button')
     btn.className = 'queue-row' + (index === currentIndex ? ' current' : '')
+    if (index === currentIndex) currentBtn = btn
 
     const idx = document.createElement('span')
     idx.className = 'queue-index'
@@ -304,6 +310,16 @@ function renderQueue(queue) {
     fragment.appendChild(li)
   })
   el.queueList.appendChild(fragment)
+
+  // Auto-scroll to the playback position, but ONLY when it actually moved or
+  // the queue was regenerated: the popup re-renders on the 1s poll and must
+  // never fight the user's own scrolling. Opening the popup on song 140 puts
+  // that song in view immediately, and every track change keeps it visible.
+  const autoScrollKey = `${queue.generatedAt}#${currentIndex}`
+  if (currentBtn && autoScrollKey !== lastAutoScrollKey) {
+    lastAutoScrollKey = autoScrollKey
+    currentBtn.scrollIntoView({ block: 'center' })
+  }
 
   if (currentIndex + 1 === queue.queue.length) {
     el.statusLine.textContent = t('queue_finished')

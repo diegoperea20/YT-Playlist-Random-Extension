@@ -38,6 +38,7 @@ Extension much better than the web: https://yt-playlist-randomizer.vercel.app
   - ▶/⏸ pause of the SAME track does not reload; changing tracks does.
   - Incompatible tracks (videos that YT Music does not serve, deleted, with restrictions) are detected with the real player error or by being stuck >13s, are marked `unavailable` and are skipped by themselves — a track is never skipped just for slow buffering.
 - Queue persistent during the session (survives closing the popup); ▶ / ⏸ / ⏮ / ⏭ controls and jump to any track from the popup.
+- **Media keys**: the hardware/browser Previous ⏮ / Next ⏭ / Play ▶ / Pause ⏸ / Stop ⏹ keys drive the shuffled queue (bound only while the extension's playback tab is playing the queue; normal YouTube browsing is never affected).
 - Automatic ES/EN i18n according to the browser.
 
 ## Installation (development)
