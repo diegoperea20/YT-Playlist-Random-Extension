@@ -16,7 +16,6 @@ const $ = (id) => document.getElementById(id)
 const el = {
   optionsBtn: $('options-btn'),
   controls: $('controls-section'),
-  diagLine: $('diag-line'),
   prevBtn: $('prev-btn'),
   playBtn: $('play-btn'),
   nextBtn: $('next-btn'),
@@ -105,16 +104,6 @@ async function refresh() {
     if (!reply?.ok) return
     state = reply
     render()
-    // Live diagnostic: last tab-routing decision of the worker (visible
-    // without the service-worker console).
-    try {
-      const { diag } = await chrome.storage.session.get('diag')
-      el.diagLine.textContent = diag
-        ? `${new Date(diag.at).toLocaleTimeString()} · ${diag.note}`
-        : ''
-    } catch {
-      el.diagLine.textContent = ''
-    }
   } catch {
     // Worker not ready (just (re)loaded): ignore and retry next tick.
   }

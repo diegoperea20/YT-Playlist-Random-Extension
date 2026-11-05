@@ -96,19 +96,6 @@ async function probePageState(tabId) {
   }
 }
 
-/**
- * Last tab-routing decision, shown in the popup's diagnostic line: the
- * "queue click spawned a second tab" complaint is a tab-routing decision,
- * and this makes it visible without the service-worker console.
- */
-async function noteDiag(note) {
-  try {
-    await chrome.storage.session.set({ diag: { note, at: Date.now() } })
-  } catch {
-    // Diagnostics are best-effort; never fail playback because of them.
-  }
-}
-
 // Both YouTube flavors count as "YouTube" everywhere: the worker must be
 // blind ONLY to non-YouTube tabs, never to the wrong YouTube flavor (the
 // user may play on www.youtube.com while the site setting says music, or
@@ -148,7 +135,6 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
 
   const claim = async (tab, why) => {
     console.log('[YPR] tab claimed:', why, 'tabId=', tab?.id)
-    void noteDiag(`claim: ${why} (tab ${tab?.id})`)
     if (tab?.id !== playback.tabId) {
       await savePlayback({ ...(await getPlayback()), tabId: tab.id, lostControl: false })
     }
@@ -240,7 +226,6 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
     const tab = await chrome.tabs.create({ url: targetUrl, active: false })
     await savePlayback({ ...(await getPlayback()), tabId: tab.id })
     console.log('[YPR] dedicated background playback tab created:', tab.id)
-    void noteDiag(`created DEDICATED tab ${tab.id} (none of your tabs held queue music)`)
     return { tab, fresh: true }
   }
 
@@ -248,7 +233,6 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
   const tab = await chrome.tabs.create({ url: targetUrl, active: activateOnCreate })
   await savePlayback({ ...(await getPlayback()), tabId: tab.id })
   console.log('[YPR] fresh playback tab created:', tab.id)
-  void noteDiag(`created FRESH tab ${tab.id} (no YouTube tab found)`)
   return { tab, fresh: true }
 }
 
@@ -319,10 +303,6 @@ async function navigateToCurrentTrack(tabId) {
     'target=', track.id,
     'holdsOurMusic=', holdsOurMusic,
   )
-  void noteDiag(
-    `play → live=${live?.videoId ?? '∅'} url=${urlVideo ?? '∅'} ` +
-      `holds=${holdsOurMusic ? 'si' : 'NO'}`,
-  )
 
   // SAME-TAB IN-PLACE TRACK CHANGE: if this tab already holds the queue's
   // music, hand the track to the page's own player (loadVideoById). This is
@@ -342,7 +322,6 @@ async function navigateToCurrentTrack(tabId) {
           lostControl: false,
         })
         console.log('[YPR] played IN PLACE (loadVideoById) in tab', targetId)
-        void noteDiag(`IN PLACE: song switched in tab ${targetId}`)
         return
       }
       // Player unavailable: fall through to the navigation path.
@@ -373,7 +352,6 @@ async function navigateToCurrentTrack(tabId) {
     if (alt) {
       targetId = alt.id
       console.log('[YPR] redirected to background tab', targetId)
-      void noteDiag(`redirect: your visible tab has other content → playing in bg tab ${targetId}`)
     } else {
       const fresh = await chrome.tabs.create({
         url: watchUrl(tabHost === 'music.youtube.com' ? 'music' : settings.site, track.id),
@@ -381,14 +359,12 @@ async function navigateToCurrentTrack(tabId) {
       })
       targetId = fresh.id
       console.log('[YPR] fresh playback tab created in redirect:', targetId)
-      void noteDiag(`redirect: created bg tab ${targetId} (your visible tab has other content)`)
     }
     await savePlayback({ ...playback, tabId: targetId, videoId: track.id, lostControl: false })
   } else {
     // OWN navigation: always takes ownership back (e.g. lostControl backoff).
     await savePlayback({ ...playback, videoId: track.id, lostControl: false })
     console.log('[YPR] navigating OUR playback tab', targetId)
-    void noteDiag(`navigating tab ${targetId} (in-place unavailable → reload)`)
   }
 
   // Navigation keeps the FINAL target tab's own YouTube flavor (www vs
@@ -796,7 +772,6 @@ async function handleMessage(message, sender) {
       const index = Math.max(0, Math.min(queue.queue.length - 1, Number(message.index) | 0))
       queue.index = index
       await saveQueueState(queue)
-      void noteDiag(`click → jump-to #${index} (${queue.queue[index]?.id ?? '?'})`)
       // Destructure: ensurePlaybackTab returns { tab, fresh }; passing the
       // wrapper's .id used to be undefined → a fresh tab on every click.
       const { tab } = await ensurePlaybackTab((await getSettings()).site)
