@@ -80,60 +80,192 @@ async function currentTrack() {
 }
 
 /**
- * Reuse the playback tab when alive and on the right host; otherwise activate the
- * first matching YouTube tab; otherwise open a new one pointed straight at the
- * current track (the site's own player autoplays it).
- * NEVER hijacks the tab the user is looking at: only background tabs are
- * reused, and fresh tabs can stay in the background too (activateOnCreate).
+ * Live truth from a tab's page: which video the player is REALLY on (and
+ * whether it is playing). Tab URLs go STALE once tracks are switched in
+ * place (`movie_player.loadVideoById` never updates the URL), so URL-only
+ * ownership checks misroute queue clicks to a fresh tab. Best-effort probe:
+ * returns null when the content script is unreachable.
+ */
+async function probePageState(tabId) {
+  try {
+    const reply = await chrome.tabs.sendMessage(tabId, { type: 'get-page-state' })
+    if (!reply?.ok || !reply.videoId) return null
+    return { videoId: reply.videoId, playing: Boolean(reply.playing) }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Last tab-routing decision, shown in the popup's diagnostic line: the
+ * "queue click spawned a second tab" complaint is a tab-routing decision,
+ * and this makes it visible without the service-worker console.
+ */
+async function noteDiag(note) {
+  try {
+    await chrome.storage.session.set({ diag: { note, at: Date.now() } })
+  } catch {
+    // Diagnostics are best-effort; never fail playback because of them.
+  }
+}
+
+// Both YouTube flavors count as "YouTube" everywhere: the worker must be
+// blind ONLY to non-YouTube tabs, never to the wrong YouTube flavor (the
+// user may play on www.youtube.com while the site setting says music, or
+// vice versa — filtering queries by the configured host made the worker
+// miss the actually-playing tab and spawn a second one).
+const YT_URL_PATTERNS = ['https://www.youtube.com/*', 'https://music.youtube.com/*']
+
+function ytHostname(url) {
+  if (!url) return null
+  try {
+    const host = new URL(url).hostname
+    return host === 'www.youtube.com' || host === 'music.youtube.com' ? host : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the playlist's playback tab and return { tab, fresh }.
+ * Priority (first hit wins):
+ *   1. The KNOWN playback tab (playback.tabId) while it is any YouTube page.
+ *   2. A visible YouTube tab already on a queue track (by URL) — MIRROR RULE.
+ *   3. A YouTube tab whose PLAYER (live probe) is on queue music — active
+ *      tabs first, background tabs after (the tab URL is unreliable after
+ *      in-place loadVideoById switches).
+ *   4. Any background YouTube tab (navigate it, never hijack the visible one).
+ *   5. A dedicated background playback tab on the current track.
+ * The configured site only decides the URL of freshly created tabs.
  */
 async function ensurePlaybackTab(site, activateOnCreate = false) {
   const playback = await getPlayback()
-  const host = site === 'music' ? 'music.youtube.com' : 'www.youtube.com'
-  const pattern = `https://${host}/*`
   const track = await currentTrack()
   const targetUrl = watchUrl(site, track?.id ?? '')
 
+  const queue = await getQueueState()
+  const queueIds = new Set((queue?.queue ?? []).map((t) => t.id))
+
+  const claim = async (tab, why) => {
+    console.log('[YPR] tab claimed:', why, 'tabId=', tab?.id)
+    void noteDiag(`claim: ${why} (tab ${tab?.id})`)
+    if (tab?.id !== playback.tabId) {
+      await savePlayback({ ...(await getPlayback()), tabId: tab.id, lostControl: false })
+    }
+    return { tab, fresh: false }
+  }
+
+  // 1) Known playback tab — but VERIFIED, not blind: the recorded tabId may
+  //    long ago have been taken back by the user (it would then redirect
+  //    elsewhere and spawn a second tab while the queue keeps playing in the
+  //    user's visible one). Keep it unless the page definitively reports a
+  //    foreign video (live probe answered with a video outside the queue).
   if (playback.tabId != null) {
+    let tab = null
     try {
-      const tab = await chrome.tabs.get(playback.tabId)
-      if (tab?.url && new URL(tab.url).hostname === host) return { tab, fresh: false }
+      tab = await chrome.tabs.get(playback.tabId)
     } catch {
-      // Tab is gone; fall through to query.
+      console.log('[YPR] known playback tab is gone')
+    }
+    if (tab) {
+      const host = ytHostname(tab.url)
+      if (host === null && tab.url) {
+        console.log('[YPR] known playback tab is not YouTube anymore:', tab.url)
+      } else if (!tab.url) {
+        return await claim(tab, 'known-playback-tab-loading')
+      } else {
+        const live = await probePageState(tab.id)
+        const contradicted = Boolean(
+          live &&
+            !queueIds.has(live.videoId) &&
+            live.videoId !== playback.videoId &&
+            live.videoId !== track?.id,
+        )
+        if (!contradicted) {
+          return await claim(tab, live ? 'known-playback-tab-verified' : 'known-playback-tab')
+        }
+        console.log('[YPR] known playback tab was taken back (page video:', live.videoId + ')')
+      }
     }
   }
 
-  const candidates = await chrome.tabs.query({ url: pattern })
-  // Prefer a background tab: navigating the visible tab would hijack it and
-  // start a second playback.
-  const background = candidates.find((t) => !t.active)
-  if (background) {
-    await savePlayback({ ...(await getPlayback()), tabId: background.id })
-    return { tab: background, fresh: false }
+  const candidates = await chrome.tabs.query({ url: YT_URL_PATTERNS }).catch(() => [])
+
+  const onQueueUrl = (tab) => {
+    if (!tab?.active) return false
+    const v = ytHostname(tab.url) ? (new URL(tab.url).searchParams.get('v') ?? '') : ''
+    return Boolean(v && queueIds.has(v))
   }
+
+  // 2) URL pass: visible tab on a queue track is THE playback tab.
+  const focused = await chrome.tabs
+    .query({ url: YT_URL_PATTERNS, active: true, lastFocusedWindow: true })
+    .catch(() => [])
+  const focusHit = focused.find(onQueueUrl)
+  if (focusHit) return await claim(focusHit, 'focused-tab-on-queue-track-url')
+  const activeHit = candidates.find(onQueueUrl)
+  if (activeHit) return await claim(activeHit, 'active-tab-on-queue-track-url')
+  const bgUrlHit = candidates.find(
+    (t) =>
+      !t.active &&
+      ytHostname(t.url) &&
+      queueIds.has(new URL(t.url).searchParams.get('v') ?? ''),
+  )
+  if (bgUrlHit) return await claim(bgUrlHit, 'background-tab-on-queue-track-url')
+
+  // 3) LIVE probe pass: what each YouTube page is REALLY watching. The URL
+  //    goes stale after in-place loadVideoById switches and after queue
+  //    regeneration, so this catches the visible playing tab even when every
+  //    URL check fails. A foreign videoId is NEVER claimed (anti-hijack).
+  const holdsOurMusicLive = (live) =>
+    Boolean(live && (queueIds.has(live.videoId) || live.videoId === playback.videoId))
+  const holders = []
+  for (const tab of candidates) {
+    const live = await probePageState(tab.id)
+    if (holdsOurMusicLive(live)) holders.push(tab)
+  }
+  const holderActive = holders.find((t) => t.active)
+  if (holderActive) return await claim(holderActive, 'live-probe-active-tab-holds-queue-music')
+  const holderBg = holders.find((t) => !t.active)
+  if (holderBg) return await claim(holderBg, 'live-probe-background-tab-holds-queue-music')
+
+  // 4) Any background YouTube tab: reuse it instead of spawning a new one.
+  const bgAny = candidates.find((t) => !t.active)
+  if (bgAny) return await claim(bgAny, 'any-background-youtube-tab')
+
+  // 5) The only YouTube tab is the one the user is LOOKING at and it does
+  //    not hold queue music: leave it alone and open a dedicated background
+  //    playback tab on the current track.
   if (candidates.length > 0) {
-    // The only matching tab is the one the user is looking at: leave it alone
-    // and open a dedicated background playback tab on the current track.
     const tab = await chrome.tabs.create({ url: targetUrl, active: false })
     await savePlayback({ ...(await getPlayback()), tabId: tab.id })
+    console.log('[YPR] dedicated background playback tab created:', tab.id)
+    void noteDiag(`created DEDICATED tab ${tab.id} (none of your tabs held queue music)`)
     return { tab, fresh: true }
   }
 
   // No suitable tab: create one already on the current track.
   const tab = await chrome.tabs.create({ url: targetUrl, active: activateOnCreate })
   await savePlayback({ ...(await getPlayback()), tabId: tab.id })
+  console.log('[YPR] fresh playback tab created:', tab.id)
+  void noteDiag(`created FRESH tab ${tab.id} (no YouTube tab found)`)
   return { tab, fresh: true }
 }
 
 /**
- * THE playback path: hand the track to YouTube's own player by navigating the
- * playback tab to its native watch URL (full reloads are fine).
+ * THE playback path: hand the track to YouTube's own player of the resolved
+ * playback tab — in place (`play-track`) when that tab already holds the
+ * queue's music, otherwise a native navigation to `watch?v=<id>`.
  *
- * ANTI-HIJACK (the user reported a queue click NAVIGATING the tab they were
- * watching a video in): the stored playback tab may long ago have been taken
- * back by the user (they browse YouTube in it now). Trust only LIVE evidence:
- * if the tab about to receive the queue's track is the one they are LOOKING
- * at and it no longer shows the worker's recorded track, refuse to hijack it
- * and redirect to another background tab / a dedicated background tab.
+ * ANTI-HIJACK: the stored playback tab may long ago have been taken back by
+ * the user (they browse YouTube in it now). When the tab about to receive
+ * the queue's track is the one they are LOOKING at and it does not hold the
+ * queue's music (live player probe first, URL as fallback), it is refused
+ * and the track goes to another background tab / a dedicated background tab.
+ *
+ * The navigation URL keeps the TARGET tab's own YouTube flavor (www vs
+ * music): switching tracks must never silently turn a music playlist page
+ * into a regular youtube.com one.
  */
 async function navigateToCurrentTrack(tabId) {
   const track = await currentTrack()
@@ -156,36 +288,128 @@ async function navigateToCurrentTrack(tabId) {
     // No focused window (screen locked, minimized): nothing to preserve.
   }
 
-  const pageVideo = targetTab?.url
-    ? (new URL(targetTab.url).searchParams.get('v') ?? null)
-    : null
+  // LIVE TRUTH first: ask the page's own player which video it is REALLY on
+  // (tab URLs go stale after in-place loadVideoById switches, so a URL lookup
+  // alone misroutes the click to a fresh tab). Fall back to the tab's URL
+  // only when the content script is unreachable (extension reloaded, etc.).
+  const live = await probePageState(targetId)
+  const urlVideo = targetTab?.url ? (new URL(targetTab.url).searchParams.get('v') ?? null) : null
+  const pageVideo = live?.videoId ?? urlVideo
 
-  // Dead/unknown tab, or the visible tab no longer holds the queue's video:
+  let queueIds = new Set()
+  try {
+    const queue = await getQueueState()
+    queueIds = new Set((queue?.queue ?? []).map((t) => t.id))
+  } catch {
+    // Queue unavailable: fall back to the recorded video only.
+  }
+  // The queue's music lives in a tab holding ANY queue track (or the worker's
+  // recorded one — or the exact track being commanded): clicking a queue song
+  // while LOOKING at the playing tab must change the song THERE, never spawn
+  // another tab.
+  const holdsOurMusic =
+    pageVideo !== null &&
+    (queueIds.has(pageVideo) || pageVideo === playback.videoId || pageVideo === track.id)
+
+  console.log(
+    '[YPR] play resolve:',
+    'tab=', targetId,
+    'live=', live?.videoId ?? '(no probe)',
+    'url=', urlVideo ?? '(no url)',
+    'target=', track.id,
+    'holdsOurMusic=', holdsOurMusic,
+  )
+  void noteDiag(
+    `play → live=${live?.videoId ?? '∅'} url=${urlVideo ?? '∅'} ` +
+      `holds=${holdsOurMusic ? 'si' : 'NO'}`,
+  )
+
+  // SAME-TAB IN-PLACE TRACK CHANGE: if this tab already holds the queue's
+  // music, hand the track to the page's own player (loadVideoById). This is
+  // immune to every tab-routing edge case: no navigation, no tab resolution,
+  // nothing to redirect — the song changes where the playlist is playing.
+  if ((targetTab?.url || live) && holdsOurMusic) {
+    try {
+      const reply = await chrome.tabs.sendMessage(targetId, {
+        type: 'play-track',
+        videoId: track.id,
+      })
+      if (reply?.ok) {
+        await savePlayback({
+          ...(await getPlayback()),
+          tabId: targetId,
+          videoId: track.id,
+          lostControl: false,
+        })
+        console.log('[YPR] played IN PLACE (loadVideoById) in tab', targetId)
+        void noteDiag(`IN PLACE: song switched in tab ${targetId}`)
+        return
+      }
+      // Player unavailable: fall through to the navigation path.
+    } catch {
+      // Content script not reachable: fall through to the navigation path.
+    }
+  }
+
+  // Dead/unknown tab, or the visible tab no longer holds the queue's music:
   // the worker's tab state must lose against what the user is actually
   // seeing. Re-resolve: another background tab on the right host (never the
   // visible one) or a dedicated background playback tab.
-  if (!targetTab?.url || (fg && fg.id === targetId && pageVideo !== playback.videoId)) {
-    const host = settings.site === 'music' ? 'music.youtube.com' : 'www.youtube.com'
+  if (!targetTab?.url || (fg && fg.id === targetId && !holdsOurMusic)) {
+    const tabHost = ytHostname(targetTab?.url ?? '')
+    if (tabHost === null) console.log('[YPR] target tab had no YouTube URL:', targetTab?.url)
     const alt = await chrome.tabs
-      .query({ url: `https://${host}/*` })
-      .then((tabs) => tabs.find((t) => !t.active))
+      .query({ url: YT_URL_PATTERNS })
+      .then(
+        (tabs) =>
+          tabs.find(
+            (t) =>
+              !t.active &&
+              t.id !== targetId &&
+              (tabHost === null || ytHostname(t.url) === tabHost),
+          ),
+      )
       .catch(() => undefined)
-    if (alt && alt.id !== targetId) {
+    if (alt) {
       targetId = alt.id
+      console.log('[YPR] redirected to background tab', targetId)
+      void noteDiag(`redirect: your visible tab has other content → playing in bg tab ${targetId}`)
     } else {
       const fresh = await chrome.tabs.create({
-        url: watchUrl(settings.site, track.id),
+        url: watchUrl(tabHost === 'music.youtube.com' ? 'music' : settings.site, track.id),
         active: false,
       })
       targetId = fresh.id
+      console.log('[YPR] fresh playback tab created in redirect:', targetId)
+      void noteDiag(`redirect: created bg tab ${targetId} (your visible tab has other content)`)
     }
     await savePlayback({ ...playback, tabId: targetId, videoId: track.id, lostControl: false })
   } else {
     // OWN navigation: always takes ownership back (e.g. lostControl backoff).
     await savePlayback({ ...playback, videoId: track.id, lostControl: false })
+    console.log('[YPR] navigating OUR playback tab', targetId)
+    void noteDiag(`navigating tab ${targetId} (in-place unavailable → reload)`)
   }
 
-  await chrome.tabs.update(targetId, { url: watchUrl(settings.site, track.id) })
+  // Navigation keeps the FINAL target tab's own YouTube flavor (www vs
+  // music): after a redirect the destination != the original target, so
+  // re-read the tab rather than reusing the stale URL view.
+  let hostNow = ytHostname(targetTab?.url ?? '')
+  if (hostNow === null || targetId !== targetTab?.id) {
+    try {
+      const finalTab = await chrome.tabs.get(targetId)
+      hostNow = ytHostname(finalTab?.url ?? '')
+    } catch {
+      hostNow = null
+    }
+  }
+  const navHost =
+    hostNow === 'music.youtube.com'
+      ? 'music'
+      : hostNow === 'www.youtube.com'
+        ? 'youtube'
+        : settings.site
+  await chrome.tabs.update(targetId, { url: watchUrl(navHost, track.id) })
 
   // FOCUS PRESERVATION: if something raises the playback tab after this
   // navigation (Chrome can, even for a background tabs.update), hand the
@@ -288,8 +512,16 @@ async function pausePlaybackTab() {
     const tab = await chrome.tabs.get(playback.tabId)
     const pageVideo = tab?.url ? (new URL(tab.url).searchParams.get('v') ?? null) : null
     if (pageVideo && playback.videoId && pageVideo !== playback.videoId) {
-      // The user took this tab back (shows another video): don't touch it.
-      return false
+      // The tab switched tracks IN PLACE earlier, so its URL shows an older
+      // queue track — that is still our music, never skip the pause.
+      let stillOurs = false
+      try {
+        const queue = await getQueueState()
+        stillOurs = (queue?.queue ?? []).some((t) => t.id === pageVideo)
+      } catch {
+        stillOurs = false
+      }
+      if (!stillOurs) return false // the user took this tab back
     }
     await chrome.tabs.sendMessage(playback.tabId, { type: 'pause-video' })
     return true
@@ -547,11 +779,12 @@ async function handleMessage(message, sender) {
 
     case 'prev': {
       const queue = await getQueueState()
-      const playback = await getPlayback()
       if (!queue?.queue?.length) return { action: 'idle' }
       if ((queue.index ?? 0) > 0) queue.index -= 1
       await saveQueueState(queue)
-      const tab = await ensurePlaybackTab((await getSettings()).site)
+      // Destructure: ensurePlaybackTab returns { tab, fresh }; passing the
+      // wrapper's .id used to be undefined → a fresh tab on every click.
+      const { tab } = await ensurePlaybackTab((await getSettings()).site)
       await savePlayback({ ...(await getPlayback()), playing: true })
       await navigateToCurrentTrack(tab.id)
       return { action: 'prev', index: queue.index }
@@ -559,12 +792,14 @@ async function handleMessage(message, sender) {
 
     case 'jump-to': {
       const queue = await getQueueState()
-      const playback = await getPlayback()
       if (!queue?.queue?.length) return { ok: false }
       const index = Math.max(0, Math.min(queue.queue.length - 1, Number(message.index) | 0))
       queue.index = index
       await saveQueueState(queue)
-      const tab = await ensurePlaybackTab((await getSettings()).site)
+      void noteDiag(`click → jump-to #${index} (${queue.queue[index]?.id ?? '?'})`)
+      // Destructure: ensurePlaybackTab returns { tab, fresh }; passing the
+      // wrapper's .id used to be undefined → a fresh tab on every click.
+      const { tab } = await ensurePlaybackTab((await getSettings()).site)
       await savePlayback({ ...(await getPlayback()), playing: true })
       await navigateToCurrentTrack(tab.id)
       return { ok: true, index }
@@ -577,9 +812,13 @@ async function handleMessage(message, sender) {
       // worker in control (no lostControl backoff).
       const [queue, playback] = await Promise.all([getQueueState(), getPlayback()])
       const current = queue?.queue?.[queue.index ?? 0]
-      const pageVideoId = sender?.tab?.url
-        ? (new URL(sender.tab.url).searchParams.get('v') ?? null)
-        : null
+      // The page's player reports its own video (message.videoId): tab URLs go
+      // STALE once the plugin switches tracks in place via loadVideoById.
+      const pageVideoId =
+        message?.videoId ??
+        (sender?.tab?.url
+          ? (new URL(sender.tab.url).searchParams.get('v') ?? null)
+          : null)
       const owned = Boolean(
         current &&
           playback.tabId != null &&

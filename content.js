@@ -42,6 +42,45 @@
         sendResponse({ ok: true })
         return false
 
+      case 'get-page-state': {
+        // Live probe so the worker can tell what THIS page is REALLY watching
+        // (the player's own truth) — tab URLs go stale after in-place track
+        // switches (loadVideoById), so URL-only checks misroute queue clicks.
+        const videoEl = document.querySelector('video')
+        sendResponse({
+          ok: true,
+          videoId: currentVideoIdNow(),
+          playing: Boolean(videoEl && !videoEl.paused && !videoEl.ended),
+        })
+        return false
+      }
+
+      case 'play-track': {
+        // Same-tab track change through the page's own player (loadVideoById):
+        // the queue advances without any navigation, so the tab, its URL and
+        // the user's scrolling stay exactly where they are.
+        const videoId = message.videoId
+        let played = false
+        try {
+          const player = document.getElementById('movie_player')
+          if (player && typeof player.loadVideoById === 'function' && videoId) {
+            player.loadVideoById(videoId)
+            played = true
+          }
+        } catch {
+          played = false
+        }
+        if (played) {
+          currentTrackedId = videoId
+          watchForUnavailable(videoId)
+          chrome.runtime
+            .sendMessage({ type: 'play-state', playing: true, videoId })
+            .catch(() => {})
+        }
+        sendResponse({ ok: played })
+        return false
+      }
+
       default:
         return false
     }
@@ -214,7 +253,7 @@
   function publishMediaSessionActions() {
     if (!('mediaSession' in navigator)) return
     chrome.runtime
-      .sendMessage({ type: 'get-media-session' })
+      .sendMessage({ type: 'get-media-session', videoId: currentVideoIdNow() })
       .then((reply) => {
         lastOwned = Boolean(reply?.owned)
         lastQueuePlaying = Boolean(reply?.queuePlaying)

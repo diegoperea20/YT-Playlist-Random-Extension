@@ -286,6 +286,21 @@ button {
 }
 .queue-position { font-size: 10.5px; margin: 0; }
 
+/* Live diagnostic line: what the worker did the last time playback moved. */
+.diag-line {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin: 6px 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* --------------------------------------------------------------- queue */
 
 .queue-list {
