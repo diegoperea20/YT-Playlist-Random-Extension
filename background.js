@@ -65,6 +65,57 @@ async function savePlayback(playback) {
 }
 
 // ---------------------------------------------------------------------------
+// Unavailability watchdog. The content script's DOM probes (.ytp-error,
+// getPlayerError, dead pause timers) can all fail exactly when the player is
+// broken, so the worker keeps its own safety net: every track the worker
+// COMMANDS must CONFIRM it is playing (`play-state {playing:true}` from the
+// playback tab). A track left unconfirmed for PENDING_WATCH_MS is marked
+// unavailable and skipped — with a real RELOAD, in case the previous one left
+// the player in a dead state that swallows loadVideoById.
+// ---------------------------------------------------------------------------
+
+const PENDING_WATCH_MS = 25000
+const PENDING_ALARM = 'ypr-pending-watch'
+
+async function clearPendingWatch(playback) {
+  console.log('[YPR] pending cleared (was', playback?.pendingVideoId ?? 'none' + ')')
+  await savePlayback({ ...playback, pendingVideoId: null, pendingAt: null })
+}
+
+async function armPendingWatch(videoId) {
+  if (!videoId) return
+  console.log('[YPR] pending armed for', videoId)
+  await savePlayback({ ...(await getPlayback()), pendingVideoId: videoId, pendingAt: Date.now() })
+  try {
+    await chrome.alarms.create(PENDING_ALARM, { when: Date.now() + PENDING_WATCH_MS })
+  } catch {
+    // No alarms API in this runtime: the content-side detection stays alone.
+  }
+}
+
+/**
+ * Mark a videoId unavailable in EVERY stored playlist (the queue generator and
+ * the skip logic honor it) — the persistence half of every skip path.
+ */
+async function markTrackUnavailable(videoId) {
+  if (!videoId) return false
+  const playlists = await getPlaylists()
+  let touched = false
+  for (const playlist of playlists) {
+    for (const track of playlist.tracks ?? []) {
+      if (track.id === videoId && track.available) {
+        track.available = false
+        touched = true
+      }
+    }
+  }
+  if (touched) {
+    await savePlaylists(playlists)
+  }
+  return touched
+}
+
+// ---------------------------------------------------------------------------
 // Playback plumbing
 // ---------------------------------------------------------------------------
 
@@ -308,7 +359,10 @@ async function navigateToCurrentTrack(tabId) {
   // music, hand the track to the page's own player (loadVideoById). This is
   // immune to every tab-routing edge case: no navigation, no tab resolution,
   // nothing to redirect — the song changes where the playlist is playing.
-  if ((targetTab?.url || live) && holdsOurMusic) {
+  // SKIPPED when the watchdog flagged the player as possibly dead: then the
+  // retry must be a real RELOAD that remounts a fresh player.
+  let playbackNow = await getPlayback()
+  if ((targetTab?.url || live) && holdsOurMusic && !playbackNow.forceNavigation) {
     try {
       const reply = await chrome.tabs.sendMessage(targetId, {
         type: 'play-track',
@@ -316,12 +370,13 @@ async function navigateToCurrentTrack(tabId) {
       })
       if (reply?.ok) {
         await savePlayback({
-          ...(await getPlayback()),
+          ...playbackNow,
           tabId: targetId,
           videoId: track.id,
           lostControl: false,
         })
         console.log('[YPR] played IN PLACE (loadVideoById) in tab', targetId)
+        await armPendingWatch(track.id)
         return
       }
       // Player unavailable: fall through to the navigation path.
@@ -360,10 +415,21 @@ async function navigateToCurrentTrack(tabId) {
       targetId = fresh.id
       console.log('[YPR] fresh playback tab created in redirect:', targetId)
     }
-    await savePlayback({ ...playback, tabId: targetId, videoId: track.id, lostControl: false })
+    await savePlayback({
+      ...playback,
+      tabId: targetId,
+      videoId: track.id,
+      lostControl: false,
+      forceNavigation: null,
+    })
   } else {
     // OWN navigation: always takes ownership back (e.g. lostControl backoff).
-    await savePlayback({ ...playback, videoId: track.id, lostControl: false })
+    await savePlayback({
+      ...playback,
+      videoId: track.id,
+      lostControl: false,
+      forceNavigation: null,
+    })
     console.log('[YPR] navigating OUR playback tab', targetId)
   }
 
@@ -386,6 +452,7 @@ async function navigateToCurrentTrack(tabId) {
         ? 'youtube'
         : settings.site
   await chrome.tabs.update(targetId, { url: watchUrl(navHost, track.id) })
+  await armPendingWatch(track.id)
 
   // FOCUS PRESERVATION: if something raises the playback tab after this
   // navigation (Chrome can, even for a background tabs.update), hand the
@@ -425,10 +492,15 @@ async function advanceQueue(tabId) {
   const queue = await getQueueState()
   if (!queue?.queue?.length) return { action: 'idle' }
 
-  const nextIndex = (queue.index ?? 0) + 1
+  // Skip past EVERY consecutively unavailable track: one broken video must
+  // never strand the queue on the next broken one either.
+  let nextIndex = (queue.index ?? 0) + 1
+  while (nextIndex < queue.queue.length && queue.queue[nextIndex].available === false) {
+    nextIndex += 1
+  }
   if (nextIndex >= queue.queue.length) {
     const playback = await getPlayback()
-    await savePlayback({ ...playback, playing: false })
+    await savePlayback({ ...playback, playing: false, pendingVideoId: null, pendingAt: null })
     return { action: 'queue-end', index: queue.index ?? 0, total: queue.queue.length }
   }
 
@@ -436,7 +508,15 @@ async function advanceQueue(tabId) {
   await saveQueueState(queue)
 
   const playback = await getPlayback()
-  if (playback.playing) {
+  const current = queue.queue[nextIndex]
+  // A COMMAND-BUT-NEVER-CONFIRMED track poisons `playing` on the way out
+  // (teardown `pause` events of the previous page report a user pause that
+  // never happened). When the queue has just moved PAST such a slot (the
+  // unconfirmed command no longer matches the current entry), it must keep
+  // moving ON regardless: nobody can pause a track that never played.
+  const neverConfirmed =
+    Boolean(playback.pendingVideoId) && playback.pendingVideoId !== current.id
+  if (playback.playing || neverConfirmed) {
     const targetId = playback.tabId ?? tabId
     if (targetId != null) {
       try {
@@ -449,7 +529,7 @@ async function advanceQueue(tabId) {
       }
     }
   }
-  return { action: 'next', index: nextIndex, videoId: queue.queue[nextIndex].id }
+  return { action: 'next', index: nextIndex, videoId: current.id }
 }
 
 /**
@@ -458,19 +538,8 @@ async function advanceQueue(tabId) {
  * and skip it like a normal end-of-track.
  */
 async function handleTrackSkip(tabId, videoId) {
-  const playlists = await getPlaylists()
-  let touched = false
-  for (const playlist of playlists) {
-    for (const track of playlist.tracks ?? []) {
-      if (track.id === videoId && track.available) {
-        track.available = false
-        touched = true
-      }
-    }
-  }
-  if (touched) {
-    await savePlaylists(playlists)
-  }
+  console.log('[YPR] player-error arrived: marking + skipping', videoId)
+  await markTrackUnavailable(videoId)
 
   if (tabId != null) {
     try {
@@ -708,6 +777,8 @@ async function handleMessage(message, sender) {
         await savePlayback({ ...(await getPlayback()), playing: true })
         // A fresh tab already opens on the current watch URL; otherwise navigate.
         if (!fresh) await navigateToCurrentTrack(tab.id)
+        // A fresh tab must still CONFIRM it actually started playing.
+        await armPendingWatch((await currentTrack())?.id)
       }
 
       return { ok: true, count: tracks.length, mode: settings.mode }
@@ -721,11 +792,30 @@ async function handleMessage(message, sender) {
         if (!queue?.queue?.length) {
           throw new YoutubeApiError('no-queue')
         }
-        const track = queue.queue[queue.index ?? 0]
+        // Never resume a track already marked unavailable (a broken video
+        // would both pause the queue here AND re-target it on play): skip
+        // forward to the first playable entry from the current position on.
+        let skipIndex = queue.index ?? 0
+        while (skipIndex < queue.queue.length && queue.queue[skipIndex].available === false) {
+          skipIndex += 1
+        }
+        if (skipIndex >= queue.queue.length) {
+          // Everything from here on is unavailable: end the queue cleanly.
+          await savePlayback({ ...playback, playing: false })
+          return { ok: true, queueEnded: true }
+        }
+        if (skipIndex !== queue.index) {
+          queue.index = skipIndex
+          await saveQueueState(queue)
+        }
+        const track = queue.queue[skipIndex]
         // The user pressed play: any previous accounted loss of this tab is over.
         await savePlayback({ ...playback, playing: true, lostControl: false })
         // The same video is still loaded in the playback tab: resume in place.
-        if (await tryResumeInPlace(playback, track)) return { ok: true, resumed: true }
+        if (await tryResumeInPlace(playback, track)) {
+          await clearPendingWatch(await getPlayback())
+          return { ok: true, resumed: true }
+        }
         const settings = await getSettings()
         const { tab } = await ensurePlaybackTab(settings.site)
         await savePlayback({ ...(await getPlayback()), tabId: tab.id, playing: true })
@@ -855,12 +945,35 @@ async function handleMessage(message, sender) {
       const trackMatches = Boolean(current && message.videoId && current.id === message.videoId)
       const takesOwnership = isKnownPlaybackTab || (playback.tabId == null && trackMatches)
       if (!takesOwnership) return { ok: true } // foreign tab: not our playback state
+      // ONLY real time progress confirms a track is playable: a broken video
+      // still fires `play` (fake playing state, zero bytes), so this message
+      // must never clear the unavailability watchdog's pending.
+      console.log(
+        '[YPR] play-state:',
+        'playing=', message.playing ?? '?',
+        'videoId=', message.videoId ?? '?',
+      )
       await savePlayback({
         ...playback,
         playing: message.playing ?? playback.playing,
         tabId: senderTabId ?? playback.tabId,
         videoId: message.videoId ?? playback.videoId,
       })
+      return { ok: true }
+    }
+
+    case 'play-progress': {
+      // The DEFINITIVE unavailability confirmation: actual currentTime
+      // advances from the playback tab's own player.
+      const playback = await getPlayback()
+      const senderTabId = sender?.tab?.id ?? null
+      const isKnownPlaybackTab = senderTabId != null && senderTabId === playback.tabId
+      if (!isKnownPlaybackTab || !playback.pendingVideoId) return { ok: true }
+      const currentTime = Number(message.currentTime) || 0
+      if (message.videoId === playback.pendingVideoId && currentTime > 1) {
+        console.log('[YPR] play-progress confirms', message.videoId, 'at', currentTime)
+        await clearPendingWatch(await getPlayback())
+      }
       return { ok: true }
     }
 
@@ -914,6 +1027,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, code })
     })
   return true // async response
+})
+
+// UNAVAILABILITY WATCHDOG: a commanded track must CONFIRM it is playing
+// (`play-state {playing:true, videoId}` from the playback tab). Anything
+// left unconfirmed — hidden/unlisted/removed videos, dead players, a
+// content script gone blind — is marked unavailable and skipped, and the
+// retry forces a real RELOAD so a dead player cannot swallow the next one.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name !== PENDING_ALARM) return
+  void (async () => {
+    try {
+      const playback = await getPlayback()
+      const queue = await getQueueState()
+      const current = queue?.queue?.[queue.index ?? 0]
+      console.log(
+        '[YPR] alarm fired:',
+        'pending=', playback.pendingVideoId ?? '(none)',
+        'current=', current?.id ?? '(no queue)',
+        'playing=', playback.playing,
+      )
+      if (!playback.pendingVideoId) return
+      if (!current || current.id !== playback.pendingVideoId) {
+        // The queue already moved past what was commanded: stale pending.
+        await clearPendingWatch(playback)
+        return
+      }
+      console.log('[YPR] watchdog: never confirmed playing, skipping:', current.id)
+      await markTrackUnavailable(current.id)
+      // Pending stays SET: advanceQueue's neverConfirmed gate relies on it
+      // ("nobody can pause a track that never played") and the NEXT command
+      // (armPendingWatch) replaces it. Force a real RELOAD on the retry: the
+      // broken track may have left the player in a dead state that silently
+      // swallows loadVideoById.
+      await savePlayback({ ...(await getPlayback()), forceNavigation: true })
+      await advanceQueue(playback.tabId)
+    } catch (error) {
+      console.log('[YPR] watchdog error', codeOf(error))
+    }
+  })()
 })
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {

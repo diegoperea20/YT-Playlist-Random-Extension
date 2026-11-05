@@ -72,10 +72,15 @@
         }
         if (played) {
           currentTrackedId = videoId
-          watchForUnavailable(videoId)
-          chrome.runtime
-            .sendMessage({ type: 'play-state', playing: true, videoId })
-            .catch(() => {})
+          // A previously-probed id may be in reportedErrors for the lifetime
+          // of this page (in-place switches share the script): clear it so
+          // the freshly commanded track gets watched EVERY time.
+          reportedErrors.delete(videoId)
+          watchForUnavailable(videoId, { inPlace: true })
+          // NO immediate play-state here! Confirming "playing" at command
+          // time disarms the worker's unavailability watchdog even when the
+          // player silently fails (unlisted/removed videos) — the REAL
+          // confirmation is the video's own `play` event listener.
         }
         sendResponse({ ok: played })
         return false
@@ -305,6 +310,25 @@
       publishMediaSessionActions()
     })
 
+    // TIME PROGRESS = the only proof that AUDIO is really coming out. A
+    // broken/unlisted video still fires `play` (the element enters the
+    // playing state with zero bytes), so progress — not the play event — is
+    // what the worker's unavailability watchdog accepts as confirmation.
+    let lastProgressSentAt = 0
+    video.addEventListener('timeupdate', () => {
+      const now = Date.now()
+      if (video.paused || video.ended) return
+      if (now - lastProgressSentAt < 4000) return // throttle
+      lastProgressSentAt = now
+      chrome.runtime
+        .sendMessage({
+          type: 'play-progress',
+          videoId: currentVideoIdNow(),
+          currentTime: video.currentTime,
+        })
+        .catch(() => {})
+    })
+
     video.addEventListener('pause', () => {
       // Our own pause/next commands pause too — only signal a *user interruption*.
       if (video.currentTime > 0 && !video.ended) {
@@ -352,14 +376,30 @@
    * region-locked, removed) or >12s dead-and-paused counts as unavailable, so a
    * buffering video is never mistaken for a broken one.
    */
-  function watchForUnavailable(videoId) {
+  function watchForUnavailable(videoId, opts = {}) {
     if (!videoId || reportedErrors.has(videoId)) return
     reportedErrors.add(videoId)
     currentTrackedId = videoId
     const started = Date.now()
+    // In-place switches NEVER change the page URL, so a URL-based identity
+    // check is meaningless there — the tracked id with the player (and the
+    // error probes below) are the only truth available.
+    const urlMismatchAborts = opts.inPlace !== true
 
     const tick = () => {
-      if (currentTrackedId !== videoId || currentVideoIdNow() !== videoId) return // moved on
+      if (currentTrackedId !== videoId) return // a newer track took over
+      // The player takes a moment to adopt a track — the URL may briefly lag
+      // after in-place loadVideoById switches, so a currentVideoIdNow()
+      // mismatch only aborts once past a settle window. Aborting on the very
+      // first tick used to kill availability watching and strand the queue
+      // on the broken track forever.
+      if (
+        urlMismatchAborts &&
+        Date.now() - started > 6000 &&
+        currentVideoIdNow() !== videoId
+      ) {
+        return // moved on
+      }
       if (Date.now() - started > 14000) return // watching is over
 
       let playerError = null
@@ -417,6 +457,9 @@
         if (reply && 'owned' in reply) setOwnedVerdict(reply.owned)
       })
       .catch(() => {})
+    // SPA navigations reuse this script instance: a previously probed id must
+    // be watchable again.
+    reportedErrors.delete(videoId)
     // Give every fresh watch page up to a few nudges to start on its own.
     ensurePagePlaying(videoId)
     setTimeout(() => ensurePagePlaying(videoId, true), 1500)
