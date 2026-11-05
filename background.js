@@ -78,13 +78,13 @@ const PENDING_WATCH_MS = 25000
 const PENDING_ALARM = 'ypr-pending-watch'
 
 async function clearPendingWatch(playback) {
-  console.log('[YPR] pending cleared (was', playback?.pendingVideoId ?? 'none' + ')')
+  // console.log('[YPR] pending cleared (was', playback?.pendingVideoId ?? 'none' + ')')
   await savePlayback({ ...playback, pendingVideoId: null, pendingAt: null })
 }
 
 async function armPendingWatch(videoId) {
   if (!videoId) return
-  console.log('[YPR] pending armed for', videoId)
+  // console.log('[YPR] pending armed for', videoId)
   await savePlayback({ ...(await getPlayback()), pendingVideoId: videoId, pendingAt: Date.now() })
   try {
     await chrome.alarms.create(PENDING_ALARM, { when: Date.now() + PENDING_WATCH_MS })
@@ -185,7 +185,7 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
   const queueIds = new Set((queue?.queue ?? []).map((t) => t.id))
 
   const claim = async (tab, why) => {
-    console.log('[YPR] tab claimed:', why, 'tabId=', tab?.id)
+    // console.log('[YPR] tab claimed:', why, 'tabId=', tab?.id)
     if (tab?.id !== playback.tabId) {
       await savePlayback({ ...(await getPlayback()), tabId: tab.id, lostControl: false })
     }
@@ -202,12 +202,12 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
     try {
       tab = await chrome.tabs.get(playback.tabId)
     } catch {
-      console.log('[YPR] known playback tab is gone')
+      // console.log('[YPR] known playback tab is gone')
     }
     if (tab) {
       const host = ytHostname(tab.url)
       if (host === null && tab.url) {
-        console.log('[YPR] known playback tab is not YouTube anymore:', tab.url)
+        // console.log('[YPR] known playback tab is not YouTube anymore:', tab.url)
       } else if (!tab.url) {
         return await claim(tab, 'known-playback-tab-loading')
       } else {
@@ -221,7 +221,7 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
         if (!contradicted) {
           return await claim(tab, live ? 'known-playback-tab-verified' : 'known-playback-tab')
         }
-        console.log('[YPR] known playback tab was taken back (page video:', live.videoId + ')')
+        // console.log('[YPR] known playback tab was taken back (page video:', live.videoId + ')')
       }
     }
   }
@@ -276,14 +276,14 @@ async function ensurePlaybackTab(site, activateOnCreate = false) {
   if (candidates.length > 0) {
     const tab = await chrome.tabs.create({ url: targetUrl, active: false })
     await savePlayback({ ...(await getPlayback()), tabId: tab.id })
-    console.log('[YPR] dedicated background playback tab created:', tab.id)
+    // console.log('[YPR] dedicated background playback tab created:', tab.id)
     return { tab, fresh: true }
   }
 
   // No suitable tab: create one already on the current track.
   const tab = await chrome.tabs.create({ url: targetUrl, active: activateOnCreate })
   await savePlayback({ ...(await getPlayback()), tabId: tab.id })
-  console.log('[YPR] fresh playback tab created:', tab.id)
+  // console.log('[YPR] fresh playback tab created:', tab.id)
   return { tab, fresh: true }
 }
 
@@ -346,14 +346,14 @@ async function navigateToCurrentTrack(tabId) {
     pageVideo !== null &&
     (queueIds.has(pageVideo) || pageVideo === playback.videoId || pageVideo === track.id)
 
-  console.log(
+  /* console.log(
     '[YPR] play resolve:',
     'tab=', targetId,
     'live=', live?.videoId ?? '(no probe)',
     'url=', urlVideo ?? '(no url)',
     'target=', track.id,
     'holdsOurMusic=', holdsOurMusic,
-  )
+  ) */
 
   // SAME-TAB IN-PLACE TRACK CHANGE: if this tab already holds the queue's
   // music, hand the track to the page's own player (loadVideoById). This is
@@ -375,7 +375,7 @@ async function navigateToCurrentTrack(tabId) {
           videoId: track.id,
           lostControl: false,
         })
-        console.log('[YPR] played IN PLACE (loadVideoById) in tab', targetId)
+        // console.log('[YPR] played IN PLACE (loadVideoById) in tab', targetId)
         await armPendingWatch(track.id)
         return
       }
@@ -391,7 +391,9 @@ async function navigateToCurrentTrack(tabId) {
   // visible one) or a dedicated background playback tab.
   if (!targetTab?.url || (fg && fg.id === targetId && !holdsOurMusic)) {
     const tabHost = ytHostname(targetTab?.url ?? '')
-    if (tabHost === null) console.log('[YPR] target tab had no YouTube URL:', targetTab?.url)
+    if (tabHost === null) {
+      /* console.log('[YPR] target tab had no YouTube URL:', targetTab?.url) */
+    }
     const alt = await chrome.tabs
       .query({ url: YT_URL_PATTERNS })
       .then(
@@ -406,14 +408,14 @@ async function navigateToCurrentTrack(tabId) {
       .catch(() => undefined)
     if (alt) {
       targetId = alt.id
-      console.log('[YPR] redirected to background tab', targetId)
+      // console.log('[YPR] redirected to background tab', targetId)
     } else {
       const fresh = await chrome.tabs.create({
         url: watchUrl(tabHost === 'music.youtube.com' ? 'music' : settings.site, track.id),
         active: false,
       })
       targetId = fresh.id
-      console.log('[YPR] fresh playback tab created in redirect:', targetId)
+      // console.log('[YPR] fresh playback tab created in redirect:', targetId)
     }
     await savePlayback({
       ...playback,
@@ -430,7 +432,7 @@ async function navigateToCurrentTrack(tabId) {
       lostControl: false,
       forceNavigation: null,
     })
-    console.log('[YPR] navigating OUR playback tab', targetId)
+    // console.log('[YPR] navigating OUR playback tab', targetId)
   }
 
   // Navigation keeps the FINAL target tab's own YouTube flavor (www vs
@@ -538,7 +540,7 @@ async function advanceQueue(tabId) {
  * and skip it like a normal end-of-track.
  */
 async function handleTrackSkip(tabId, videoId) {
-  console.log('[YPR] player-error arrived: marking + skipping', videoId)
+  // console.log('[YPR] player-error arrived: marking + skipping', videoId)
   await markTrackUnavailable(videoId)
 
   if (tabId != null) {
@@ -948,11 +950,11 @@ async function handleMessage(message, sender) {
       // ONLY real time progress confirms a track is playable: a broken video
       // still fires `play` (fake playing state, zero bytes), so this message
       // must never clear the unavailability watchdog's pending.
-      console.log(
+      /* console.log(
         '[YPR] play-state:',
         'playing=', message.playing ?? '?',
         'videoId=', message.videoId ?? '?',
-      )
+      ) */
       await savePlayback({
         ...playback,
         playing: message.playing ?? playback.playing,
@@ -971,7 +973,7 @@ async function handleMessage(message, sender) {
       if (!isKnownPlaybackTab || !playback.pendingVideoId) return { ok: true }
       const currentTime = Number(message.currentTime) || 0
       if (message.videoId === playback.pendingVideoId && currentTime > 1) {
-        console.log('[YPR] play-progress confirms', message.videoId, 'at', currentTime)
+        // console.log('[YPR] play-progress confirms', message.videoId, 'at', currentTime)
         await clearPendingWatch(await getPlayback())
       }
       return { ok: true }
@@ -1023,7 +1025,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .then(sendResponse)
     .catch((error) => {
       const code = codeOf(error)
-      console.log('[YPR] error', code, error?.message)
+      // console.log('[YPR] error', code, error?.message)
       sendResponse({ ok: false, code })
     })
   return true // async response
@@ -1041,19 +1043,19 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       const playback = await getPlayback()
       const queue = await getQueueState()
       const current = queue?.queue?.[queue.index ?? 0]
-      console.log(
+      /* console.log(
         '[YPR] alarm fired:',
         'pending=', playback.pendingVideoId ?? '(none)',
         'current=', current?.id ?? '(no queue)',
         'playing=', playback.playing,
-      )
+      ) */
       if (!playback.pendingVideoId) return
       if (!current || current.id !== playback.pendingVideoId) {
         // The queue already moved past what was commanded: stale pending.
         await clearPendingWatch(playback)
         return
       }
-      console.log('[YPR] watchdog: never confirmed playing, skipping:', current.id)
+      // console.log('[YPR] watchdog: never confirmed playing, skipping:', current.id)
       await markTrackUnavailable(current.id)
       // Pending stays SET: advanceQueue's neverConfirmed gate relies on it
       // ("nobody can pause a track that never played") and the NEXT command
@@ -1063,7 +1065,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       await savePlayback({ ...(await getPlayback()), forceNavigation: true })
       await advanceQueue(playback.tabId)
     } catch (error) {
-      console.log('[YPR] watchdog error', codeOf(error))
+      // console.log('[YPR] watchdog error', codeOf(error))
     }
   })()
 })
