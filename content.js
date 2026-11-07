@@ -314,11 +314,15 @@
     // broken/unlisted video still fires `play` (the element enters the
     // playing state with zero bytes), so progress — not the play event — is
     // what the worker's unavailability watchdog accepts as confirmation.
+    // Confirms fast: during a track's first ~4s (resets naturally on every
+    // in-place loadVideoById switch, the check is on currentTime) send every
+    // ~1s so the worker's pending watch closes BEFORE the user might pause;
+    // afterwards fall back to the routine 4s heartbeat.
     let lastProgressSentAt = 0
     video.addEventListener('timeupdate', () => {
       const now = Date.now()
       if (video.paused || video.ended) return
-      if (now - lastProgressSentAt < 4000) return // throttle
+      if (now - lastProgressSentAt < (video.currentTime <= 4 ? 1000 : 4000)) return // throttle
       lastProgressSentAt = now
       chrome.runtime
         .sendMessage({

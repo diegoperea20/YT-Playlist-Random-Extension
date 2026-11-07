@@ -511,24 +511,26 @@ async function advanceQueue(tabId) {
 
   const playback = await getPlayback()
   const current = queue.queue[nextIndex]
-  // A COMMAND-BUT-NEVER-CONFIRMED track poisons `playing` on the way out
-  // (teardown `pause` events of the previous page report a user pause that
-  // never happened). When the queue has just moved PAST such a slot (the
-  // unconfirmed command no longer matches the current entry), it must keep
-  // moving ON regardless: nobody can pause a track that never played.
-  const neverConfirmed =
-    Boolean(playback.pendingVideoId) && playback.pendingVideoId !== current.id
-  if (playback.playing || neverConfirmed) {
-    const targetId = playback.tabId ?? tabId
-    if (targetId != null) {
-      try {
-        await navigateToCurrentTrack(targetId)
-      } catch {
-        // The playback tab died mid-queue: re-resolve it without hijacking
-        // the tab the user is looking at.
-        const { tab } = await ensurePlaybackTab((await getSettings()).site)
-        await navigateToCurrentTrack(tab.id)
-      }
+  // ALWAYS command the new track, paused or not: pressing ⏭ (media key or
+  // popup) while the queue is paused must still make the next SONG load in
+  // the tab. Gating this on `playing` left the tab stuck on the old video
+  // with the queue index silently advancing underneath (and the pause-side
+  // pending-disarm removed the stale-pending accident that used to paper
+  // over it). The playback state syncs from reality: a fresh watch page
+  // autoplays and the in-place path's loadVideoById starts playing, while a
+  // paused-after-command never-confirmed track is handled inside the
+  // playback path itself. NEVER-CONFIRMED note: the old gate relied on
+  // `pendingVideoId`, but pausing disarms it now — commanding unconditioned
+  // is strictly more correct.
+  const targetId = playback.tabId ?? tabId
+  if (targetId != null) {
+    try {
+      await navigateToCurrentTrack(targetId)
+    } catch {
+      // The playback tab died mid-queue: re-resolve it without hijacking
+      // the tab the user is looking at.
+      const { tab } = await ensurePlaybackTab((await getSettings()).site)
+      await navigateToCurrentTrack(tab.id)
     }
   }
   return { action: 'next', index: nextIndex, videoId: current.id }
@@ -815,7 +817,10 @@ async function handleMessage(message, sender) {
         await savePlayback({ ...playback, playing: true, lostControl: false })
         // The same video is still loaded in the playback tab: resume in place.
         if (await tryResumeInPlace(playback, track)) {
-          await clearPendingWatch(await getPlayback())
+          // RE-ARM (not clear): a resumed-but-silent video (broken player,
+          // zero bytes) keeps watchdog protection, and real progress confirms
+          // it within ~1-2s. A pause right after this safely disarms again.
+          await armPendingWatch(track.id)
           return { ok: true, resumed: true }
         }
         const settings = await getSettings()
@@ -823,7 +828,17 @@ async function handleMessage(message, sender) {
         await savePlayback({ ...(await getPlayback()), tabId: tab.id, playing: true })
         await navigateToCurrentTrack(tab.id)
       } else {
-        await savePlayback({ ...playback, playing: false, lostControl: false })
+        // Pausing also DISARMS the unavailability watchdog: a track the user
+        // stopped (before its progress confirmation arrived) must never be
+        // marked unavailable, and no stray 25s alarm may force-advance a
+        // queue they asked to hold still. The next playback command re-arms.
+        await savePlayback({
+          ...playback,
+          playing: false,
+          lostControl: false,
+          pendingVideoId: null,
+          pendingAt: null,
+        })
         await pausePlaybackTab()
       }
       return { ok: true }
@@ -1053,6 +1068,24 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       if (!current || current.id !== playback.pendingVideoId) {
         // The queue already moved past what was commanded: stale pending.
         await clearPendingWatch(playback)
+        return
+      }
+      // A PAUSED queue is user intent, not an unavailability: pausing before
+      // the ~1-4s confirmation window closed used to leave the pending armed
+      // forever and the watchdog force-skipped the very track the user asked
+      // to keep still. Never advance a queue the user stopped.
+      if (!playback.playing) {
+        await clearPendingWatch(await getPlayback())
+        return
+      }
+      // State lag: the worker still believes playing=true but the page's own
+      // player reports paused (the play-state message is on its way — e.g. a
+      // spacebar/media-key pause racing this alarm). Not a broken video.
+      // When the content script is unreachable (probe null) or the page says
+      // it IS playing with no progress, the broken-video path below applies.
+      const pausedLive = playback.tabId != null ? await probePageState(playback.tabId) : null
+      if (pausedLive && !pausedLive.playing) {
+        await clearPendingWatch(await getPlayback())
         return
       }
       // console.log('[YPR] watchdog: never confirmed playing, skipping:', current.id)
