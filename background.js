@@ -942,8 +942,11 @@ async function handleMessage(message, sender) {
       })
 
       // Never navigate from here (that would reload forever): the page that just
-      // loaded is nudged by content.js itself.
-      if (track && playback.playing) {
+      // loaded is nudged by content.js itself. The kick is OWNERSHIP-GATED: a
+      // foreign YouTube tab parked on the queue's current track (the user
+      // opening a playlist song to check it) must not autoplay a DUPLICATE
+      // of the song the queue is already playing in its own tab.
+      if (track && playback.playing && takesOwnership) {
         return { kick: true, videoId: track.id }
       }
       return { kick: false }
@@ -995,13 +998,37 @@ async function handleMessage(message, sender) {
     }
 
     case 'track-ended': {
-      const playback = await getPlayback()
-      return await advanceQueue(playback.tabId ?? sender?.tab?.id ?? null)
+      // FENCE (parity with play-state/content-ready): 'ended' fires on EVERY
+      // YouTube tab — the user's own videos, ad segments inside them and
+      // shorts all use the same native <video> + this content script, so an
+      // unfenced track-ended lets a RANDOM tab finish ANY video and advance
+      // the shuffled queue ("I started another video / skipped an ad and the
+      // playlist jumped"). Ownership match on the queue's CURRENT track is
+      // mandatory in both branches: it doubles as a guard against ads (their
+      // player's getVideoData() returns the COMMERCIAL's id, never ours) and
+      // stale ghost 'ended' events from a page the queue already moved past.
+      const [queue, playback] = await Promise.all([getQueueState(), getPlayback()])
+      const current = queue?.queue?.[queue.index ?? 0]
+      const senderTabId = sender?.tab?.id ?? null
+      const isKnownPlaybackTab = senderTabId != null && senderTabId === playback.tabId
+      const videoMatches = Boolean(current && message.videoId && current.id === message.videoId)
+      const takesOwnership = videoMatches && (isKnownPlaybackTab || playback.tabId == null)
+      if (!takesOwnership) return { ok: true } // foreign/ghost event: never advance the queue
+      return await advanceQueue(playback.tabId ?? senderTabId ?? null)
     }
 
     case 'player-error': {
-      const playback = await getPlayback()
-      return await handleTrackSkip(playback.tabId ?? sender?.tab?.id ?? null, message.videoId)
+      // Same fence as track-ended: a random tab's player error (ads, the
+      // user's own videos, unrelated watch pages) must not mark queue
+      // tracks unavailable nor skip the playing one.
+      const [queue, playback] = await Promise.all([getQueueState(), getPlayback()])
+      const current = queue?.queue?.[queue.index ?? 0]
+      const senderTabId = sender?.tab?.id ?? null
+      const isKnownPlaybackTab = senderTabId != null && senderTabId === playback.tabId
+      const videoMatches = Boolean(current && message.videoId && current.id === message.videoId)
+      const takesOwnership = videoMatches && (isKnownPlaybackTab || playback.tabId == null)
+      if (!takesOwnership) return { ok: true }
+      return await handleTrackSkip(playback.tabId ?? senderTabId ?? null, message.videoId)
     }
 
     case 'yt-navigation': {
