@@ -24,6 +24,8 @@ const el = {
   queueSection: $('queue-section'),
   queueTitle: $('queue-title'),
   queueCount: $('queue-count'),
+  queueSearch: $('queue-search'),
+  searchEmpty: $('search-empty'),
   queueList: $('queue-list'),
   urlInput: $('url-input'),
   addBtn: $('add-btn'),
@@ -71,6 +73,8 @@ function applyStaticI18n() {
   el.mixPlayBtn.textContent = t('mix_play')
   el.mixBtn.textContent = t('mix_only')
   el.queueTitle.textContent = t('queue_title')
+  el.queueSearch.placeholder = t('search_placeholder')
+  el.searchEmpty.textContent = t('search_no_results')
   el.optionsBtn.title = t('options_title')
   el.prevBtn.title = t('prev')
   el.nextBtn.title = t('next_title')
@@ -129,6 +133,25 @@ function showGenError(code) {
 // Last queue position the auto-scroll followed (generatedAt + index), so the
 // view only follows actual track changes, not every 1s re-render.
 let lastAutoScrollKey = null
+
+// Queue search: filter by title/channel, accent- and case-insensitive. The
+// query survives the 1s re-render but is cleared when the queue is regenerated.
+let queueSearchQuery = ''
+let lastSearchGeneratedAt = null
+
+function normalizeForSearch(text) {
+  return String(text ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+function searchMatches(track, query) {
+  return (
+    normalizeForSearch(track.title).includes(query) ||
+    normalizeForSearch(track.channel).includes(query)
+  )
+}
 
 function render() {
   const { settings, playlists, queue, playback } = state
@@ -256,11 +279,26 @@ function modeCard(mode, selected) {
 function renderQueue(queue) {
   const playback = state.playback
   const currentIndex = queue.index ?? 0
+
+  // A freshly generated queue invalidates the user's search: start clean.
+  if (lastSearchGeneratedAt !== queue.generatedAt) {
+    lastSearchGeneratedAt = queue.generatedAt
+    queueSearchQuery = ''
+    el.queueSearch.value = ''
+  }
+  const query = normalizeForSearch(queueSearchQuery).trim()
+  const searching = query.length > 0
+
   el.queueList.replaceChildren()
+  el.searchEmpty.classList.add('hidden')
   let currentBtn = null
+  let matchCount = 0
 
   const fragment = document.createDocumentFragment()
   queue.queue.forEach((track, index) => {
+    if (searching && !searchMatches(track, query)) return
+    matchCount++
+
     const li = document.createElement('li')
     const btn = document.createElement('button')
     btn.className = 'queue-row' + (index === currentIndex ? ' current' : '')
@@ -311,12 +349,19 @@ function renderQueue(queue) {
   })
   el.queueList.appendChild(fragment)
 
+  // Nothing found: say so instead of showing an empty box.
+  if (searching && matchCount === 0) {
+    el.searchEmpty.classList.remove('hidden')
+  }
+
   // Auto-scroll to the playback position, but ONLY when it actually moved or
   // the queue was regenerated: the popup re-renders on the 1s poll and must
   // never fight the user's own scrolling. Opening the popup on song 140 puts
   // that song in view immediately, and every track change keeps it visible.
+  // While a search filter is active it must not fire at all: the visible list
+  // is the user's filtered view, not the full queue.
   const autoScrollKey = `${queue.generatedAt}#${currentIndex}`
-  if (currentBtn && autoScrollKey !== lastAutoScrollKey) {
+  if (currentBtn && !searching && autoScrollKey !== lastAutoScrollKey) {
     lastAutoScrollKey = autoScrollKey
     currentBtn.scrollIntoView({ block: 'center' })
   }
@@ -428,6 +473,29 @@ el.nextBtn.addEventListener('click', async () => {
 el.prevBtn.addEventListener('click', async () => {
   await message({ type: 'prev' })
   refresh()
+})
+
+// ---------------------------------------------------------------- queue search
+
+el.queueSearch.addEventListener('input', () => {
+  queueSearchQuery = el.queueSearch.value
+  render()
+})
+
+el.queueSearch.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return
+  event.preventDefault()
+  const queue = state.queue
+  if (!queue?.queue?.length) return
+  const query = normalizeForSearch(queueSearchQuery).trim()
+  if (!query) return
+  // Enter => jump to the first PLAYABLE match (like clicking its row).
+  const match = queue.queue.find(
+    (track) => track.available && searchMatches(track, query),
+  )
+  if (match) {
+    message({ type: 'jump-to', index: queue.queue.indexOf(match) }).then(refresh)
+  }
 })
 
 el.optionsBtn.addEventListener('click', () => {

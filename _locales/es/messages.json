@@ -52,6 +52,8 @@
   "mix_play": { "message": "Mezclar y reproducir" },
   "mix_only": { "message": "Solo mezclar" },
   "queue_title": { "message": "Cola" },
+  "search_placeholder": { "message": "Buscar canción…" },
+  "search_no_results": { "message": "No encontrado" },
   "in_queue": {
     "message": "$COUNT$ en la cola",
     "placeholders": { "count": { "content": "$1" } }

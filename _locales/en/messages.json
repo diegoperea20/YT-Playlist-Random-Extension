@@ -50,6 +50,8 @@
   "mix_play": { "message": "Shuffle & play" },
   "mix_only": { "message": "Shuffle only" },
   "queue_title": { "message": "Queue" },
+  "search_placeholder": { "message": "Search song…" },
+  "search_no_results": { "message": "Not found" },
   "in_queue": {
     "message": "$COUNT$ in queue",
     "placeholders": { "count": { "content": "$1" } }

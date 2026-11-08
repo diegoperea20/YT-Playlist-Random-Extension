@@ -296,6 +296,29 @@ button {
   background: var(--panel);
 }
 
+/* Queue search box — mirrors the URL input styling (which is scoped to
+   input[type="text"], so a type="search" needs its own rules here). */
+.queue-search {
+  width: 100%;
+  margin-bottom: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  outline: none;
+  font-family: inherit;
+  font-size: 12.5px;
+}
+.queue-search:focus { border-color: var(--text-dim); }
+.queue-search::placeholder { color: var(--text-dim); }
+.queue-search::-webkit-search-cancel-button { cursor: pointer; }
+
+.search-empty {
+  text-align: center;
+  margin: 6px 0 4px;
+}
+
 .queue-row {
   display: flex;
   align-items: center;
